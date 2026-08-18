@@ -43,7 +43,9 @@ problems with mise.
 
 ## What's here
 
-- `index.html`, `styles.css`, `main.ts` --- a minimal starting site. Replace it.
+- `src/pages/`, `src/styles/` --- an Astro starting site (this repo swapped the
+  template's default Vite/vanilla stack for Astro; see `CLAUDE.md`). Replace it.
+- `astro.config.mjs` --- sets `base` for GitHub Pages' subpath deployment.
 - `mise.toml` --- the tested Node and pnpm versions for this template.
 - `spec/` --- what the checks are for (`README.md`), the shipped invariants
   (`invariants.test.ts`), and a replaceable starter test (`starter.test.ts`);
@@ -59,10 +61,9 @@ problems with mise.
   like an API key, so your COMP4020 key can't end up in a public repo. Installed
   automatically by `pnpm install`.
 
-This template is SSG-agnostic: plain HTML/CSS/TypeScript on Vite, so you can add
-Astro, Eleventy, or any static generator later without changing how it deploys.
-The course plugin's `stack` skill performs the swap for you — to the course
-default (Astro) or bare HTML/CSS — with the Pages base path, lockfile, and CI
-link check handled.
+This template is SSG-agnostic --- it shipped as plain HTML/CSS/TypeScript on
+Vite, and this repo swapped that for Astro without changing how it deploys.
+TypeScript is the course default over plain JavaScript: the types are extra
+backpressure, and your agent feels it before you do.
 
 See the course site for how the checks map to each week of the course.
