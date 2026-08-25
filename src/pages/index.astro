@@ -1,4 +1,5 @@
 ---
+import { GROOVES, PRESETS, PROGRESSIONS, SCALES, VOICES } from "../lib/music";
 import "../styles/global.css";
 ---
 
@@ -9,7 +10,7 @@ import "../styles/global.css";
     <title>Carousel</title>
     <meta
       name="description"
-      content="Draw a spectrogram and hear it. The loop scrolls into a play bar over a chord progression — low is drums, high is notes, and every mark lands in key."
+      content="Draw a spectrogram and hear it. A looping drawing machine with chord progressions, grooves and synth voices — every mark lands in key."
     />
 
     <!--
@@ -42,90 +43,196 @@ import "../styles/global.css";
         </div>
       </section>
 
-      <div data-controls>
+      <!--
+        Presets first and everything else folded away. The crit opens with a
+        stranger playing this before a word is said, so the top level stays a
+        canvas and a row of names; the desk is there for anyone who opens it.
+      -->
+      <div data-presets role="group" aria-label="Presets">
+        {
+          PRESETS.map((preset) => (
+            <button type="button" data-preset={preset.id}>
+              {preset.name}
+            </button>
+          ))
+        }
         <button type="button" data-clear>Clear</button>
-        <button type="button" data-toggle="chords" aria-pressed="true">
-          Chords
-        </button>
-        <button type="button" data-toggle="voice" aria-pressed="true">
-          Voicing
-        </button>
-        <button type="button" data-toggle="arp" aria-pressed="false">Arp</button>
-        <button type="button" data-toggle="snap" aria-pressed="true">
-          Snap
-        </button>
-        <p data-hint>Hold shift to rub out.</p>
       </div>
+
+      <details data-desk>
+        <summary>More</summary>
+
+        <div data-rack>
+          <label>
+            Voice
+            <select data-pick="voice">
+              {VOICES.map((v) => <option value={v.id}>{v.name}</option>)}
+            </select>
+          </label>
+
+          <label>
+            Chords
+            <select data-pick="progression">
+              {
+                PROGRESSIONS.map((p) => <option value={p.id}>{p.name}</option>)
+              }
+            </select>
+          </label>
+
+          <label>
+            Scale
+            <select data-pick="scale">
+              {SCALES.map((s) => <option value={s.id}>{s.name}</option>)}
+            </select>
+          </label>
+
+          <label>
+            Groove
+            <select data-pick="groove">
+              {GROOVES.map((g) => <option value={g.id}>{g.name}</option>)}
+            </select>
+          </label>
+
+          <label>
+            Tone
+            <input
+              type="range"
+              data-knob="cutoff"
+              min="300"
+              max="9000"
+              step="50"
+              value="2200"
+            />
+          </label>
+
+          <label>
+            Bite
+            <input
+              type="range"
+              data-knob="resonance"
+              min="0"
+              max="18"
+              step="0.5"
+              value="2"
+            />
+          </label>
+
+          <label>
+            Swing
+            <input
+              type="range"
+              data-knob="swing"
+              min="0"
+              max="0.85"
+              step="0.05"
+              value="0"
+            />
+          </label>
+
+          <label>
+            Length
+            <input
+              type="range"
+              data-knob="loop"
+              min="2.5"
+              max="12"
+              step="0.5"
+              value="6"
+            />
+          </label>
+
+          <div data-switches>
+            <button type="button" data-toggle="chords" aria-pressed="true">
+              Harmony
+            </button>
+            <button type="button" data-toggle="voice" aria-pressed="true">
+              Voicing
+            </button>
+            <button type="button" data-toggle="arp" aria-pressed="false">
+              Arp
+            </button>
+            <button type="button" data-toggle="snap" aria-pressed="true">
+              Snap
+            </button>
+          </div>
+
+          <p data-hint>Hold shift to rub out.</p>
+        </div>
+      </details>
     </main>
 
     <script>
+      import {
+        GROOVES,
+        KEY_HZ,
+        PRESETS,
+        PROGRESSIONS,
+        SCALES,
+        SUBDIVS,
+        VOICES,
+        byId,
+        semitoneOf,
+        swingOffset,
+        voiceOffsets,
+      } from "../lib/music";
+
       const canvas = document.querySelector<HTMLCanvasElement>("[data-grid]");
       const stage = document.querySelector<HTMLElement>("[data-stage]");
-      const clearButton = document.querySelector<HTMLElement>("[data-clear]");
 
-      // The loop is a field of intensities: FIELD_W slices of time by BANDS of
-      // pitch. Deliberately much finer than a step sequencer's grid — nothing
-      // about a drawn note's length or loudness is quantised.
       const FIELD_W = 512;
       const BANDS = 20;
-      const DRUM_BANDS = 4; // bottom up: kick, tom, snare, hat
+      const DRUM_BANDS = 4;
       const TONE_BANDS = BANDS - DRUM_BANDS;
 
-      const LOOP_S = 6;
-      const BAR_FRAC = 0.18; // the play bar, as a fraction of the width
-
-      // Structure. Four bars to the loop, eight subdivisions to the bar, so
-      // drums can be placed to a thirty-second of the loop.
       const BARS = 4;
-      const SUBDIVS = BARS * 8;
       const SUB_COLS = FIELD_W / SUBDIVS;
       const BAR_COLS = FIELD_W / BARS;
+      const BAR_FRAC = 0.18;
 
-      // A minor, and a progression that never leaves it. Sevenths rather than
-      // triads: four notes fill the bands evenly and the extra tone is what
-      // makes a held chord sound considered rather than plain.
-      const KEY_HZ = 110; // A2
-      const MINOR = [0, 2, 3, 5, 7, 8, 10];
-      const PROGRESSION = [
-        { name: "Am7", tones: [0, 3, 7, 10] },
-        { name: "Fmaj7", tones: [8, 12, 15, 19] },
-        { name: "Cmaj7", tones: [3, 7, 10, 14] },
-        { name: "G7", tones: [10, 14, 17, 20] },
-      ];
-
-      // Voicing a single mark as a chord. In chord mode the neighbouring bands
-      // are already the next chord tones, so +1 and +2 build the real chord.
-      // In scale mode the same job needs a diatonic third and fifth, which is
-      // +2 and +4 scale degrees.
       const VOICE_LEVELS = [0.5, 0.32];
-
       const BRUSH_X = 7;
       const BRUSH_Y = 1.3;
+
+      // Drums get almost no vertical spread. At the wider brush a hit bled
+      // enough into the band above to cross its onset threshold, so every kick
+      // fired the tom underneath it and the kit sounded like mush.
+      const BRUSH_Y_DRUM = 0.55;
+
       const TAP = 0.45;
       const FLOW = 0.09;
-
       const ONSET = 0.18;
       const AUDIO_TICK_MS = 10;
-
-      // Below this a mark is too faint to see against the background, so it
-      // must not be able to make a sound either.
       const SILENCE = 0.04;
 
       const field = new Float32Array(FIELD_W * BANDS);
       const targets = new Float32Array(TONE_BANDS);
       const shown = new Float32Array(FIELD_W * BANDS);
 
-      let harmonise = true; // bands locked to the progression
-      let voicing = true; // one mark sounds as a chord
-      let arping = false; // chords read out a tone at a time
-      let snapping = true; // drums magnetise to the grid
+      let voice = VOICES[0];
+      let progression = PROGRESSIONS[0];
+      let scale = SCALES[0];
+      let cutoff = 2200;
+      let resonance = 2;
+      let swing = 0;
+      let loopS = 6;
 
-      type Voice = { osc: OscillatorNode; gain: GainNode };
+      let locked = true; // bands follow the progression
+      let voicing = true;
+      let arping = false;
+      let snapping = true;
+
+      type Bank = {
+        osc: OscillatorNode;
+        gain: GainNode;
+        mod: OscillatorNode;
+        modGain: GainNode;
+      };
       type Audio = {
         ctx: AudioContext;
         master: GainNode;
+        filter: BiquadFilterNode;
         noise: AudioBuffer;
-        voices: Voice[];
+        voices: Bank[];
         startedAt: number;
       };
 
@@ -152,32 +259,15 @@ import "../styles/global.css";
       const offCtx = off.getContext("2d");
       const offImage = offCtx?.createImageData(FIELD_W, BANDS);
 
-      function at(col: number, band: number): number {
-        return band * FIELD_W + col;
-      }
+      const at = (col: number, band: number) => band * FIELD_W + col;
+      const chordAt = (col: number) =>
+        Math.floor(col / BAR_COLS) % BARS;
 
-      // ---- the musical layout ------------------------------------------------
-
-      // Which chord is in force at a given column of the loop.
-      function chordAt(col: number): number {
-        return Math.floor(col / BAR_COLS) % BARS;
-      }
-
-      // Where a band sits, in semitones above the key. With the progression
-      // locked in, consecutive bands are consecutive chord tones, so the whole
-      // keyboard moves with the harmony. Unlocked, they are scale degrees.
-      function semitoneOf(index: number, chord: number): number {
-        if (harmonise) {
-          const tones = PROGRESSION[chord].tones;
-          return tones[index % 4] + 12 * Math.floor(index / 4);
-        }
-        return MINOR[index % 7] + 12 * Math.floor(index / 7);
-      }
-
-      // The two bands that voice a mark as a chord.
-      function voiceOffsets(): [number, number] {
-        return harmonise ? [1, 2] : [2, 4];
-      }
+      // Locked to the progression, a band is a chord tone; unlocked, a degree
+      // of the scale. Both are just an ascending set of semitones, so the same
+      // layout function serves either.
+      const tonesFor = (chord: number) =>
+        locked ? progression.bars[chord].tones : scale.steps;
 
       // ---- sound ------------------------------------------------------------
 
@@ -193,30 +283,69 @@ import "../styles/global.css";
 
         const ctx = new AudioContext();
         const master = ctx.createGain();
-
+        const filter = ctx.createBiquadFilter();
         const squash = ctx.createDynamicsCompressor();
+
+        filter.type = "lowpass";
+        filter.frequency.value = cutoff;
+        filter.Q.value = resonance;
+
         squash.threshold.value = -20;
         squash.ratio.value = 10;
 
         master.gain.value = 0.9;
-        master.connect(squash).connect(ctx.destination);
+        master.connect(filter).connect(squash).connect(ctx.destination);
 
-        const voices: Voice[] = [];
+        const voices: Bank[] = [];
         for (let i = 0; i < TONE_BANDS; i++) {
           const osc = ctx.createOscillator();
           const gain = ctx.createGain();
+          const mod = ctx.createOscillator();
+          const modGain = ctx.createGain();
 
-          osc.type = "triangle";
-          osc.frequency.value = KEY_HZ * 2 ** (semitoneOf(i, 0) / 12);
+          osc.type = voice.wave;
           gain.gain.value = 0;
+
+          // The modulator is always wired; a voice without FM simply runs it
+          // at zero depth, which keeps switching voices a matter of setting
+          // numbers rather than rebuilding the graph mid-note.
+          modGain.gain.value = 0;
+          mod.connect(modGain).connect(osc.frequency);
+          mod.start();
 
           osc.connect(gain).connect(master);
           osc.start();
-          voices.push({ osc, gain });
+          voices.push({ osc, gain, mod, modGain });
         }
 
-        audio = { ctx, master, noise: makeNoise(ctx), voices, startedAt: 0 };
+        audio = {
+          ctx,
+          master,
+          filter,
+          noise: makeNoise(ctx),
+          voices,
+          startedAt: 0,
+        };
+        applyVoice();
         return audio;
+      }
+
+      function applyVoice(): void {
+        if (!audio) return;
+        const now = audio.ctx.currentTime;
+
+        for (const bank of audio.voices) {
+          bank.osc.type = voice.wave;
+          bank.modGain.gain.setTargetAtTime(voice.fmDepth, now, 0.02);
+        }
+        tunedTo = -1; // modulator frequencies follow the carriers
+      }
+
+      function applyFilter(): void {
+        if (!audio) return;
+        const now = audio.ctx.currentTime;
+        audio.filter.frequency.setTargetAtTime(cutoff, now, 0.03);
+        audio.filter.Q.setTargetAtTime(resonance, now, 0.03);
       }
 
       function envelope(
@@ -242,13 +371,13 @@ import "../styles/global.css";
         decay: number,
       ): void {
         const source = active.ctx.createBufferSource();
-        const filter = active.ctx.createBiquadFilter();
+        const shape = active.ctx.createBiquadFilter();
 
         source.buffer = active.noise;
-        filter.type = type;
-        filter.frequency.value = frequency;
+        shape.type = type;
+        shape.frequency.value = frequency;
 
-        source.connect(filter).connect(envelope(active, when, peak, decay));
+        source.connect(shape).connect(envelope(active, when, peak, decay));
         source.start(when);
         source.stop(when + decay + 0.02);
       }
@@ -271,9 +400,6 @@ import "../styles/global.css";
         osc.stop(when + decay + 0.04);
       }
 
-      // Four drums that should never be mistaken for one another: a deep thud
-      // with a click on the front, a hollow pitched boom, a crack with a body
-      // tone under the noise, and a tick short enough to read as metal.
       function drum(active: Audio, band: number, when: number, level: number) {
         if (band === 0) {
           swept(active, when, 160, 45, 0.1, level * 0.95, 0.3);
@@ -299,22 +425,24 @@ import "../styles/global.css";
         if (!audio || audioTimer === undefined) return -1;
         const elapsed = audio.ctx.currentTime - audio.startedAt;
         if (elapsed < 0) return 0;
-        return ((elapsed / LOOP_S) * FIELD_W) % FIELD_W;
+        return ((elapsed / loopS) * FIELD_W) % FIELD_W;
       }
 
-      // Retunes the whole bank when the progression moves on. A note held
-      // across a bar line changes pitch to stay a chord tone, which is the
-      // voice leading a player would do by hand.
       function retune(active: Audio, chord: number, now: number): void {
         if (chord === tunedTo) return;
         tunedTo = chord;
 
+        const tones = tonesFor(chord);
         for (let i = 0; i < active.voices.length; i++) {
-          active.voices[i].osc.frequency.setTargetAtTime(
-            KEY_HZ * 2 ** (semitoneOf(i, chord) / 12),
-            now,
-            0.02,
-          );
+          const hz = KEY_HZ * 2 ** (semitoneOf(i, tones) / 12);
+          active.voices[i].osc.frequency.setTargetAtTime(hz, now, 0.02);
+          if (voice.fmRatio > 0) {
+            active.voices[i].mod.frequency.setTargetAtTime(
+              hz * voice.fmRatio,
+              now,
+              0.02,
+            );
+          }
         }
       }
 
@@ -330,10 +458,9 @@ import "../styles/global.css";
 
         retune(active, chordAt(col), now);
 
-        // Gather what the bar is sitting on, voicing each mark as a chord
-        // before anything reaches a gain, so the harmony notes mix with
-        // whatever else is drawn there rather than stacking on top of it.
         targets.fill(0);
+        const offsets = voiceOffsets(locked);
+
         for (let i = 0; i < TONE_BANDS; i++) {
           const raw = field[at(col, DRUM_BANDS + i)];
           if (raw < SILENCE) continue;
@@ -341,7 +468,6 @@ import "../styles/global.css";
           targets[i] = Math.min(1, targets[i] + raw);
           if (!voicing) continue;
 
-          const offsets = voiceOffsets();
           for (let v = 0; v < offsets.length; v++) {
             const to = i + offsets[v];
             if (to < TONE_BANDS) {
@@ -355,19 +481,18 @@ import "../styles/global.css";
         lastSub = sub;
 
         if (arping) {
-          // One tone per subdivision, cycling up through whatever is drawn.
-          // Notes left behind ring on rather than being cut, so the arpeggio
-          // overlaps itself the way a real one does.
           if (crossed) {
             const live: number[] = [];
             for (let i = 0; i < TONE_BANDS; i++) {
               if (targets[i] > 0) live.push(i);
             }
-
             if (live.length > 0) {
-              const pick = live[arpStep % live.length];
+              pluck(
+                active.voices[live[arpStep % live.length]].gain,
+                targets[live[arpStep % live.length]],
+                now,
+              );
               arpStep++;
-              pluck(active.voices[pick].gain, targets[pick], now);
             } else {
               arpStep = 0;
             }
@@ -392,12 +517,12 @@ import "../styles/global.css";
         }
       }
 
-      function silenceVoices(): void {
+      function hushVoices(): void {
         if (!audio) return;
         const now = audio.ctx.currentTime;
-        for (const voice of audio.voices) {
-          voice.gain.gain.cancelScheduledValues(now);
-          voice.gain.gain.setTargetAtTime(0, now, 0.05);
+        for (const bank of audio.voices) {
+          bank.gain.gain.cancelScheduledValues(now);
+          bank.gain.gain.setTargetAtTime(0, now, 0.05);
         }
       }
 
@@ -413,7 +538,26 @@ import "../styles/global.css";
         return active;
       }
 
+      // Changing the length must not make the loop jump: hold the current
+      // position and move the start time under it instead.
+      function setLoop(next: number): void {
+        if (audio && audioTimer !== undefined) {
+          const held = position();
+          loopS = next;
+          audio.startedAt =
+            audio.ctx.currentTime - (held / FIELD_W) * next;
+          return;
+        }
+        loopS = next;
+      }
+
       // ---- painting ---------------------------------------------------------
+
+      function snapCol(col: number): number {
+        const step = Math.round(col / SUB_COLS);
+        const swung = (step + swingOffset(step, swing)) * SUB_COLS;
+        return ((Math.round(swung) % FIELD_W) + FIELD_W) % FIELD_W;
+      }
 
       function paint(
         col: number,
@@ -421,21 +565,22 @@ import "../styles/global.css";
         wipe: boolean,
         amount: number,
       ): void {
-        // Drums land on the grid, notes land where they were drawn. Rubbing
-        // out is never snapped, or a stray hit would be unerasable.
-        if (snapping && !wipe && band < DRUM_BANDS) {
-          col = (Math.round(col / SUB_COLS) * SUB_COLS) % FIELD_W;
-        }
+        const drums = band < DRUM_BANDS;
+        if (snapping && !wipe && drums) col = snapCol(col);
 
+        const spreadY = drums ? BRUSH_Y_DRUM : BRUSH_Y;
         const reachX = Math.ceil(BRUSH_X);
-        const reachY = Math.ceil(BRUSH_Y);
+        const reachY = Math.ceil(spreadY);
 
         for (let dy = -reachY; dy <= reachY; dy++) {
           const y = band + dy;
           if (y < 0 || y >= BANDS) continue;
 
+          // A note must never bleed into a drum, or a melody would play the kit.
+          if (drums !== y < DRUM_BANDS) continue;
+
           for (let dx = -reachX; dx <= reachX; dx++) {
-            const falloff = 1 - Math.hypot(dx / BRUSH_X, dy / BRUSH_Y);
+            const falloff = 1 - Math.hypot(dx / BRUSH_X, dy / spreadY);
             if (falloff <= 0) continue;
 
             const x = (col + dx + FIELD_W) % FIELD_W;
@@ -452,9 +597,6 @@ import "../styles/global.css";
         }
       }
 
-      // A pointer reports where it is, not the path it took, so a quick drag
-      // arrives as a handful of far-apart samples. Stamping along the line
-      // between the last mark and this one keeps a fast gesture a line.
       function stroke(
         from: [number, number],
         to: [number, number],
@@ -479,6 +621,16 @@ import "../styles/global.css";
             wipe,
             amount,
           );
+        }
+      }
+
+      function stampGroove(id: string): void {
+        for (let band = 0; band < DRUM_BANDS; band++) {
+          for (let col = 0; col < FIELD_W; col++) field[at(col, band)] = 0;
+        }
+        for (const hit of byId(GROOVES, id).hits) {
+          const swung = (hit.sub + swingOffset(hit.sub, swing)) * SUB_COLS;
+          paint(Math.round(swung) % FIELD_W, hit.band, false, hit.level);
         }
       }
 
@@ -535,9 +687,15 @@ import "../styles/global.css";
         const height = canvas.clientHeight;
         if (width === 0 || height === 0) return;
 
-        if (canvas.width !== Math.round(width * dpr)) {
-          canvas.width = Math.round(width * dpr);
-          canvas.height = Math.round(height * dpr);
+        // Both dimensions, not just the width. Opening the desk changes only
+        // the height, and a stale backing store gets squashed into the new box
+        // — everything drawn lands at the wrong place, most visibly the drums
+        // floating above their own grid.
+        const wantW = Math.round(width * dpr);
+        const wantH = Math.round(height * dpr);
+        if (canvas.width !== wantW || canvas.height !== wantH) {
+          canvas.width = wantW;
+          canvas.height = wantH;
         }
 
         if (painting) {
@@ -549,12 +707,9 @@ import "../styles/global.css";
           }
         }
 
-        // The display carries the voiced chord as well as the drawn mark, so
-        // nothing is audible without being visible — and parallel bands above
-        // a note is what a spectrogram of a real instrument looks like.
         shown.set(field);
         if (voicing) {
-          const offsets = voiceOffsets();
+          const offsets = voiceOffsets(locked);
           for (let band = DRUM_BANDS; band < BANDS; band++) {
             for (let col = 0; col < FIELD_W; col++) {
               const raw = field[at(col, band)];
@@ -604,15 +759,15 @@ import "../styles/global.css";
         const screenX = (col: number) =>
           (((col - scroll + FIELD_W) % FIELD_W) / FIELD_W) * width;
 
-        // The subdivision grid lives in the drum band, where snapping applies.
         if (snapping) {
           for (let sub = 0; sub < SUBDIVS; sub++) {
+            const swung = (sub + swingOffset(sub, swing)) * SUB_COLS;
             ctx2d.fillStyle =
               sub % 2 === 0
                 ? "rgba(255,255,255,0.10)"
                 : "rgba(255,255,255,0.04)";
             ctx2d.fillRect(
-              screenX(sub * SUB_COLS),
+              screenX(swung),
               split * height,
               1,
               (1 - split) * height,
@@ -620,19 +775,15 @@ import "../styles/global.css";
           }
         }
 
-        // Bar lines and their chord names run the full height: this is the
-        // song's structure, and a player should be able to see where the
-        // harmony turns over before they draw into it.
-        ctx2d.font =
-          "500 11px ui-monospace, SFMono-Regular, Menlo, monospace";
+        ctx2d.font = "500 11px ui-monospace, SFMono-Regular, Menlo, monospace";
         for (let bar = 0; bar < BARS; bar++) {
           const x = screenX(bar * BAR_COLS);
           ctx2d.fillStyle = "rgba(255,255,255,0.16)";
           ctx2d.fillRect(x, 0, 1, height);
 
-          if (harmonise) {
+          if (locked) {
             ctx2d.fillStyle = "rgba(255,255,255,0.5)";
-            ctx2d.fillText(PROGRESSION[bar].name, x + 6, 15);
+            ctx2d.fillText(progression.bars[bar].name, x + 6, 15);
           }
         }
 
@@ -683,9 +834,6 @@ import "../styles/global.css";
           lastMark = cell;
         });
 
-        // Only records where the pointer is. The painting happens in the frame
-        // loop, because the field scrolls underneath a held brush and no
-        // pointer event fires while the pointer is not moving.
         canvas.addEventListener("pointermove", (event) => {
           pointerX = event.clientX;
           pointerY = event.clientY;
@@ -730,9 +878,130 @@ import "../styles/global.css";
         });
       }
 
-      clearButton?.addEventListener("click", () => {
-        field.fill(0);
-      });
+      // ---- the desk ---------------------------------------------------------
+
+      function setSwitch(name: string, on: boolean): void {
+        const button = document.querySelector<HTMLElement>(
+          `[data-toggle="${name}"]`,
+        );
+        button?.setAttribute("aria-pressed", String(on));
+      }
+
+      function setKnob(name: string, value: number): void {
+        const input = document.querySelector<HTMLInputElement>(
+          `[data-knob="${name}"]`,
+        );
+        if (input) input.value = String(value);
+      }
+
+      function setPick(name: string, value: string): void {
+        const select = document.querySelector<HTMLSelectElement>(
+          `[data-pick="${name}"]`,
+        );
+        if (select) select.value = value;
+      }
+
+      function applyPreset(id: string): void {
+        const preset = byId(PRESETS, id);
+
+        voice = byId(VOICES, preset.voice);
+        progression = byId(PROGRESSIONS, preset.progression);
+        cutoff = preset.cutoff;
+        resonance = preset.resonance;
+        swing = preset.swing;
+        locked = preset.chords;
+        voicing = preset.voicing;
+        arping = preset.arp;
+        setLoop(preset.loop);
+
+        setPick("voice", preset.voice);
+        setPick("progression", preset.progression);
+        setPick("groove", preset.groove);
+        setKnob("cutoff", preset.cutoff);
+        setKnob("resonance", preset.resonance);
+        setKnob("swing", preset.swing);
+        setKnob("loop", preset.loop);
+        setSwitch("chords", preset.chords);
+        setSwitch("voice", preset.voicing);
+        setSwitch("arp", preset.arp);
+
+        for (const button of document.querySelectorAll("[data-preset]")) {
+          button.setAttribute(
+            "aria-pressed",
+            String(button.getAttribute("data-preset") === id),
+          );
+        }
+
+        applyVoice();
+        applyFilter();
+        hushVoices();
+        stampGroove(preset.groove);
+        tunedTo = -1;
+      }
+
+      for (const button of document.querySelectorAll<HTMLElement>(
+        "[data-preset]",
+      )) {
+        button.addEventListener("click", () => {
+          stage?.setAttribute("data-touched", "");
+          start();
+          applyPreset(button.dataset.preset ?? "");
+        });
+      }
+
+      document
+        .querySelector<HTMLElement>("[data-clear]")
+        ?.addEventListener("click", () => {
+          field.fill(0);
+          hushVoices();
+        });
+
+      for (const select of document.querySelectorAll<HTMLSelectElement>(
+        "[data-pick]",
+      )) {
+        select.addEventListener("change", () => {
+          switch (select.dataset.pick) {
+            case "voice":
+              voice = byId(VOICES, select.value);
+              applyVoice();
+              break;
+            case "progression":
+              progression = byId(PROGRESSIONS, select.value);
+              tunedTo = -1;
+              break;
+            case "scale":
+              scale = byId(SCALES, select.value);
+              tunedTo = -1;
+              break;
+            default:
+              start();
+              stampGroove(select.value);
+          }
+        });
+      }
+
+      for (const input of document.querySelectorAll<HTMLInputElement>(
+        "[data-knob]",
+      )) {
+        input.addEventListener("input", () => {
+          const value = Number(input.value);
+          switch (input.dataset.knob) {
+            case "cutoff":
+              cutoff = value;
+              applyFilter();
+              break;
+            case "resonance":
+              resonance = value;
+              applyFilter();
+              break;
+            case "swing":
+              swing = value;
+              break;
+            default:
+              setLoop(value);
+          }
+        });
+      }
 
       for (const button of document.querySelectorAll<HTMLElement>(
         "[data-toggle]",
@@ -743,15 +1012,15 @@ import "../styles/global.css";
 
           switch (button.dataset.toggle) {
             case "chords":
-              harmonise = on;
-              tunedTo = -1; // the whole bank needs retuning to the new layout
+              locked = on;
+              tunedTo = -1;
               break;
             case "voice":
               voicing = on;
               break;
             case "arp":
               arping = on;
-              silenceVoices(); // sustains and plucks drive the gains differently
+              hushVoices();
               break;
             default:
               snapping = on;

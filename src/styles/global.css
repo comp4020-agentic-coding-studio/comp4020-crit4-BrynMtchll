@@ -96,10 +96,64 @@ h1 {
   text-shadow: 0 0 1.5rem rgb(0 0 0 / 70%);
 }
 
-[data-controls] {
+[data-presets] {
   display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
   align-items: center;
-  gap: 1rem;
+}
+
+[data-desk] {
+  font-size: 0.85rem;
+}
+
+[data-desk] summary {
+  display: inline-block;
+  padding: 0.2rem 0.5rem;
+  margin-left: -0.5rem;
+  cursor: pointer;
+  border-radius: 0.3rem;
+  opacity: 0.5;
+}
+
+[data-desk] summary:hover,
+[data-desk] summary:focus-visible {
+  opacity: 1;
+}
+
+[data-rack] {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.1rem;
+  align-items: center;
+  padding-top: 0.6rem;
+}
+
+[data-rack] label {
+  display: flex;
+  gap: 0.45rem;
+  align-items: center;
+  white-space: nowrap;
+  opacity: 0.75;
+}
+
+[data-rack] select {
+  padding: 0.2rem 0.3rem;
+  font: inherit;
+  color: var(--ink);
+  background: #1a1d26;
+  border: 1px solid var(--edge);
+  border-radius: 0.3rem;
+}
+
+[data-rack] input[type="range"] {
+  width: 6.5rem;
+  accent-color: #7fd4c1;
+}
+
+[data-switches] {
+  display: flex;
+  gap: 0.4rem;
 }
 
 button {
