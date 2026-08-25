@@ -41,16 +41,30 @@ describe("crit 4 spec: an instrument", () => {
   });
 
   it("is playable with more than one input modality", () => {
+    // Quote class includes a backtick: the production minifier rewrites string
+    // literals as template literals, so `addEventListener("pointerdown"` ships
+    // as addEventListener(`pointerdown` and a ["'] class reads a working
+    // instrument as having no listeners at all.
+    const Q = "[\"'`]";
+    const listener = (events: string) =>
+      new RegExp(`addEventListener\\(\\s*${Q}(?:${events})${Q}`);
+
     const modalities: [string, RegExp][] = [
-      ["mouse/pointer", /addEventListener\(\s*["'](?:click|mouse\w+|pointer\w+)["']/],
-      ["keyboard", /addEventListener\(\s*["']key\w+["']/],
-      ["touch", /addEventListener\(\s*["']touch\w+["']/],
+      ["mouse/pointer", listener("click|mouse\\w+|pointer\\w+")],
+      ["keyboard", listener("key\\w+")],
+      ["touch", listener("touch\\w+")],
     ];
     const present = modalities.filter(([, pattern]) => pattern.test(shipped));
 
+    // Count, not arrayContaining: two expect.any(String) matchers both match
+    // the same single element, so arrayContaining passes on one modality —
+    // the assertion has to be about how many distinct ones are present. A
+    // lower bound, not toHaveLength, since the spec asks for at least two.
+    const found = present.map(([name]) => name);
+
     expect(
-      present.map(([name]) => name),
-      "the spec asks for whatever is at hand — mouse, keyboard, or touch — so at least two input modalities should have listeners in the shipped JS",
-    ).toEqual(expect.arrayContaining([expect.any(String), expect.any(String)]));
+      found.length,
+      `the spec asks for whatever is at hand — mouse, keyboard, or touch — so at least two input modalities should have listeners in the shipped JS. Found: ${found.join(", ") || "none"}`,
+    ).toBeGreaterThanOrEqual(2);
   });
 });
