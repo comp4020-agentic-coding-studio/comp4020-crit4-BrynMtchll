@@ -22,8 +22,12 @@ and see `spec/README.md` for how the checks in this repo relate to it.
   lint, and the spec --- so you catch those in seconds instead of waiting for
   the pipeline. The links check, the evidence check, the secrets scan, and the
   deploy itself only run in CI; reproduce the links check locally against a
-  fresh `pnpm build` with
-  `pnpm dlx linkinator ./dist --silent --skip "^https?://(?!localhost|127)"`.
+  fresh `pnpm build` by serving it and crawling that, which is what CI does:
+  `pnpm exec astro preview --port 4321 &` then
+  `pnpm dlx linkinator "http://localhost:4321/comp4020-crit4-BrynMtchll/" --silent --recurse --skip "^https?://(?!localhost|127)"`.
+  Crawling `./dist` as a filesystem root cannot pass while `base` is set: every
+  internal URL carries the `/<repo>/` prefix a server adds, so a correct build
+  reports its own script tag as a broken link.
 - To see what the page actually looks like rather than what you assume it looks
   like, open it in a browser (the `agent-browser` CLI, documented on
   [the course site](https://comp.anu.edu.au/courses/comp4020-agentic-coding-studio/topics/backpressure/#agent-browser-the-rendered-page-as-ground-truth),
