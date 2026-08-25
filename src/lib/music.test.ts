@@ -3,10 +3,14 @@ import {
   CHORDS,
   GROOVES,
   IN_KEY,
+  PERCUSSION,
+  PERC_BANDS,
   PRESETS,
   PROGRESSIONS,
   SUBDIVS,
   VOICES,
+  VOWELS,
+  bandForDrumMidi,
   byId,
   semitoneOf,
   swingOffset,
@@ -99,7 +103,7 @@ describe("grooves", () => {
         expect(hit.sub).toBeLessThan(SUBDIVS);
         expect(hit.band, `${groove.id} hit outside the drum bands`)
           .toBeGreaterThanOrEqual(0);
-        expect(hit.band).toBeLessThan(4);
+        expect(hit.band).toBeLessThan(PERC_BANDS);
         expect(hit.level).toBeGreaterThan(0);
         expect(hit.level).toBeLessThanOrEqual(1);
       }
@@ -126,6 +130,8 @@ describe("presets", () => {
         preset.progression,
       );
       expect(byId(GROOVES, preset.groove).id, preset.id).toBe(preset.groove);
+      expect(byId(VOICES, preset.bass).id, preset.id).toBe(preset.bass);
+      expect(byId(VOWELS, preset.vowel).id, preset.id).toBe(preset.vowel);
     }
   });
 
@@ -149,5 +155,33 @@ describe("swing", () => {
     expect(swingOffset(2, 0.6)).toBe(0);
     expect(swingOffset(1, 0.6)).toBeCloseTo(0.3);
     expect(swingOffset(1, 0)).toBe(0);
+  });
+});
+
+describe("the kit", () => {
+  it("gives every piece its own MIDI note", () => {
+    const midis = PERCUSSION.map((piece) => piece.midi);
+    expect(new Set(midis).size, "two pieces share a MIDI note").toBe(
+      midis.length,
+    );
+  });
+
+  // The reverse map is hand-written, so this is the test that catches a typo
+  // in it: a model's answer landing on the wrong drum, or on none at all.
+  it("maps each piece's own note back to itself", () => {
+    PERCUSSION.forEach((piece, band) => {
+      expect(bandForDrumMidi(piece.midi), `${piece.id} does not round-trip`).toBe(
+        band,
+      );
+    });
+  });
+
+  it("never sends a model's note to a band that does not exist", () => {
+    for (let pitch = 0; pitch < 128; pitch++) {
+      const band = bandForDrumMidi(pitch);
+      if (band === null) continue;
+      expect(band, `pitch ${pitch}`).toBeGreaterThanOrEqual(0);
+      expect(band, `pitch ${pitch}`).toBeLessThan(PERC_BANDS);
+    }
   });
 });

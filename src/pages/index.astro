@@ -1,5 +1,12 @@
 ---
-import { GROOVES, PRESETS, PROGRESSIONS, SCALES, VOICES } from "../lib/music";
+import {
+  GROOVES,
+  PRESETS,
+  PROGRESSIONS,
+  SCALES,
+  VOICES,
+  VOWELS,
+} from "../lib/music";
 import "../styles/global.css";
 ---
 
@@ -39,7 +46,7 @@ import "../styles/global.css";
         ></canvas>
         <div data-invitation>
           <h1>Draw to play</h1>
-          <p data-testid="intro">Low is drums, high is notes.</p>
+          <p data-testid="intro">Drums low, bass in the middle, notes up top.</p>
         </div>
       </section>
 
@@ -78,6 +85,20 @@ import "../styles/global.css";
             Voice
             <select data-pick="voice">
               {VOICES.map((v) => <option value={v.id}>{v.name}</option>)}
+            </select>
+          </label>
+
+          <label>
+            Bass
+            <select data-pick="bass">
+              {VOICES.map((v) => <option value={v.id}>{v.name}</option>)}
+            </select>
+          </label>
+
+          <label>
+            Vowel
+            <select data-pick="vowel">
+              {VOWELS.map((v) => <option value={v.id}>{v.name}</option>)}
             </select>
           </label>
 
@@ -174,16 +195,20 @@ import "../styles/global.css";
 
     <script>
       import {
-        DRUM_MIDI,
+        BASS_BANDS,
         GROOVES,
         KEY_HZ,
         KEY_MIDI,
         PRESETS,
+        PERCUSSION,
+        PERC_BANDS,
         PROGRESSIONS,
         SCALES,
         SUBDIVS,
         VOICES,
+        VOWELS,
         bandForDrumMidi,
+        drumMidi,
         byId,
         semitoneOf,
         swingOffset,
@@ -196,9 +221,19 @@ import "../styles/global.css";
       const stage = document.querySelector<HTMLElement>("[data-stage]");
 
       const FIELD_W = 512;
-      const BANDS = 20;
-      const DRUM_BANDS = 4;
-      const TONE_BANDS = BANDS - DRUM_BANDS;
+
+      // Three regions stacked bottom to top: the kit, the bass, the lead. Each
+      // is a separate instrument with its own synth, and a stroke can never
+      // cross between them — a melody must not be able to play the drums.
+      const PERC = PERC_BANDS;
+      const BASS = BASS_BANDS;
+      const TONE_BANDS = 16;
+      const BANDS = PERC + BASS + TONE_BANDS;
+      const BASS_FROM = PERC;
+      const LEAD_FROM = PERC + BASS;
+
+      const regionOf = (band: number) =>
+        band < PERC ? 0 : band < LEAD_FROM ? 1 : 2;
 
       const BARS = 4;
       const SUB_COLS = FIELD_W / SUBDIVS;
@@ -225,6 +260,8 @@ import "../styles/global.css";
       const shown = new Float32Array(FIELD_W * BANDS);
 
       let voice = VOICES[0];
+      let bass = VOICES[10]; // Round
+      let vowel = VOWELS[0];
       let progression = PROGRESSIONS[0];
       let scale = SCALES[0];
       let cutoff = 2200;
@@ -249,6 +286,10 @@ import "../styles/global.css";
         filter: BiquadFilterNode;
         noise: AudioBuffer;
         voices: Bank[];
+        bassVoices: Bank[];
+        formants: BiquadFilterNode[];
+        dry: GainNode;
+        wet: GainNode;
         startedAt: number;
       };
 
@@ -261,13 +302,13 @@ import "../styles/global.css";
       let pointerX = 0;
       let pointerY = 0;
       let lastMark: [number, number] | null = null;
-      let cursorBand = DRUM_BANDS + 4;
+      let cursorBand = LEAD_FROM + 4;
       let showCursor = false;
 
       let tunedTo = -1;
       let lastSub = -1;
       let arpStep = 0;
-      const lastDrum = new Float32Array(DRUM_BANDS);
+      const lastDrum = new Float32Array(PERC);
 
       const off = document.createElement("canvas");
       off.width = FIELD_W;
@@ -294,6 +335,32 @@ import "../styles/global.css";
         return buffer;
       }
 
+      // One oscillator plus its modulator, wired into a destination. The
+      // modulator is always present; a voice without FM just runs it at zero
+      // depth, so changing voice is a matter of setting numbers rather than
+      // rebuilding the graph under a sounding note.
+      function makeBank(
+        ctx: AudioContext,
+        into: AudioNode,
+        spec: { wave: OscillatorType },
+      ): Bank {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        const mod = ctx.createOscillator();
+        const modGain = ctx.createGain();
+
+        osc.type = spec.wave;
+        gain.gain.value = 0;
+        modGain.gain.value = 0;
+
+        mod.connect(modGain).connect(osc.frequency);
+        mod.start();
+        osc.connect(gain).connect(into);
+        osc.start();
+
+        return { osc, gain, mod, modGain };
+      }
+
       function ensureAudio(): Audio {
         if (audio) return audio;
 
@@ -312,26 +379,41 @@ import "../styles/global.css";
         master.gain.value = 0.9;
         master.connect(filter).connect(squash).connect(ctx.destination);
 
+        // The lead runs through a formant bank so it can be made to sound like
+        // a vowel. Three bandpass filters in parallel at the resonances of a
+        // vocal tract, mixed against the plain signal — the same trick a
+        // vocoder uses, and no recording anywhere near it.
+        const leadBus = ctx.createGain();
+        const dry = ctx.createGain();
+        const wet = ctx.createGain();
+
+        dry.gain.value = 1;
+        wet.gain.value = 0;
+        leadBus.connect(dry).connect(master);
+
+        const formants: BiquadFilterNode[] = [];
+        for (let i = 0; i < 3; i++) {
+          const band = ctx.createBiquadFilter();
+          band.type = "bandpass";
+          band.frequency.value = 500;
+          band.Q.value = 9;
+          leadBus.connect(band).connect(wet);
+          formants.push(band);
+        }
+        wet.connect(master);
+
+        const bassBus = ctx.createGain();
+        bassBus.gain.value = 1;
+        bassBus.connect(master);
+
         const voices: Bank[] = [];
         for (let i = 0; i < TONE_BANDS; i++) {
-          const osc = ctx.createOscillator();
-          const gain = ctx.createGain();
-          const mod = ctx.createOscillator();
-          const modGain = ctx.createGain();
+          voices.push(makeBank(ctx, leadBus, voice));
+        }
 
-          osc.type = voice.wave;
-          gain.gain.value = 0;
-
-          // The modulator is always wired; a voice without FM simply runs it
-          // at zero depth, which keeps switching voices a matter of setting
-          // numbers rather than rebuilding the graph mid-note.
-          modGain.gain.value = 0;
-          mod.connect(modGain).connect(osc.frequency);
-          mod.start();
-
-          osc.connect(gain).connect(master);
-          osc.start();
-          voices.push({ osc, gain, mod, modGain });
+        const bassVoices: Bank[] = [];
+        for (let i = 0; i < BASS; i++) {
+          bassVoices.push(makeBank(ctx, bassBus, bass));
         }
 
         audio = {
@@ -340,9 +422,14 @@ import "../styles/global.css";
           filter,
           noise: makeNoise(ctx),
           voices,
+          bassVoices,
+          formants,
+          dry,
+          wet,
           startedAt: 0,
         };
         applyVoice();
+        applyVowel();
         return audio;
       }
 
@@ -354,7 +441,31 @@ import "../styles/global.css";
           bank.osc.type = voice.wave;
           bank.modGain.gain.setTargetAtTime(voice.fmDepth, now, 0.02);
         }
+        for (const bank of audio.bassVoices) {
+          bank.osc.type = bass.wave;
+          bank.modGain.gain.setTargetAtTime(bass.fmDepth, now, 0.02);
+        }
         tunedTo = -1; // modulator frequencies follow the carriers
+      }
+
+      function applyVowel(): void {
+        if (!audio) return;
+        const now = audio.ctx.currentTime;
+        const on = vowel.formants.length > 0;
+
+        // Some plain signal is kept even at full vowel: formants alone are thin
+        // and lose the bottom of the note entirely.
+        audio.dry.gain.setTargetAtTime(on ? 0.35 : 1, now, 0.05);
+        audio.wet.gain.setTargetAtTime(on ? 1.6 : 0, now, 0.05);
+
+        if (!on) return;
+        for (let i = 0; i < audio.formants.length; i++) {
+          audio.formants[i].frequency.setTargetAtTime(
+            vowel.formants[i],
+            now,
+            0.05,
+          );
+        }
       }
 
       function applyFilter(): void {
@@ -416,17 +527,51 @@ import "../styles/global.css";
         osc.stop(when + decay + 0.04);
       }
 
+      // Eight pieces that should never be mistaken for one another. Switched
+      // on the kit's own ids rather than band numbers, so reordering the kit
+      // cannot silently reassign a sound.
       function drum(active: Audio, band: number, when: number, level: number) {
-        if (band === 0) {
-          swept(active, when, 160, 45, 0.1, level * 0.95, 0.3);
-          burst(active, when, "highpass", 3000, level * 0.18, 0.015);
-        } else if (band === 1) {
-          swept(active, when, 260, 110, 0.18, level * 0.7, 0.34);
-        } else if (band === 2) {
-          burst(active, when, "bandpass", 1800, level * 0.5, 0.16);
-          swept(active, when, 190, 170, 0.1, level * 0.3, 0.11);
-        } else {
-          burst(active, when, "highpass", 9000, level * 0.32, 0.028);
+        switch (PERCUSSION[band].id) {
+          case "sub":
+            // Long, low and nearly pure: the weight under the kick.
+            swept(active, when, 72, 38, 0.07, level * 0.95, 0.8);
+            break;
+          case "kick":
+            swept(active, when, 165, 48, 0.09, level * 0.95, 0.28);
+            burst(active, when, "highpass", 3200, level * 0.16, 0.012);
+            break;
+          case "tom":
+            swept(active, when, 260, 110, 0.18, level * 0.7, 0.34);
+            break;
+          case "snare":
+            burst(active, when, "bandpass", 1800, level * 0.5, 0.15);
+            swept(active, when, 190, 170, 0.1, level * 0.3, 0.1);
+            break;
+          case "clap":
+            // Three fast taps and a tail. The stutter is what separates a clap
+            // from a snare; a single burst just sounds like a bad snare.
+            for (let i = 0; i < 3; i++) {
+              burst(
+                active,
+                when + i * 0.011,
+                "bandpass",
+                1500,
+                level * 0.28,
+                0.05,
+              );
+            }
+            burst(active, when + 0.034, "bandpass", 1150, level * 0.32, 0.13);
+            break;
+          case "rim":
+            burst(active, when, "bandpass", 2600, level * 0.32, 0.028);
+            swept(active, when, 420, 400, 0.02, level * 0.22, 0.03);
+            break;
+          case "hat":
+            burst(active, when, "highpass", 9500, level * 0.3, 0.024);
+            break;
+          default:
+            // Open hat: same metal, held long enough to ring into the next beat.
+            burst(active, when, "highpass", 7000, level * 0.26, 0.24);
         }
       }
 
@@ -460,6 +605,20 @@ import "../styles/global.css";
             );
           }
         }
+
+        // The bass takes the same chord an octave down, so it can only ever
+        // land on a note the harmony already contains.
+        for (let i = 0; i < active.bassVoices.length; i++) {
+          const hz = (KEY_HZ / 2) * 2 ** (semitoneOf(i, tones) / 12);
+          active.bassVoices[i].osc.frequency.setTargetAtTime(hz, now, 0.02);
+          if (bass.fmRatio > 0) {
+            active.bassVoices[i].mod.frequency.setTargetAtTime(
+              hz * bass.fmRatio,
+              now,
+              0.02,
+            );
+          }
+        }
       }
 
       function listen(): void {
@@ -478,7 +637,7 @@ import "../styles/global.css";
         const offsets = voiceOffsets(locked);
 
         for (let i = 0; i < TONE_BANDS; i++) {
-          const raw = field[at(col, DRUM_BANDS + i)];
+          const raw = field[at(col, LEAD_FROM + i)];
           if (raw < SILENCE) continue;
 
           targets[i] = Math.min(1, targets[i] + raw);
@@ -523,7 +682,19 @@ import "../styles/global.css";
           }
         }
 
-        for (let band = 0; band < DRUM_BANDS; band++) {
+        // The bass region. Always sustained, never arpeggiated and never
+        // voiced into a chord: a bass line wants to be one note at a time.
+        for (let i = 0; i < BASS; i++) {
+          const raw = field[at(col, BASS_FROM + i)];
+          const level = raw < SILENCE ? 0 : raw;
+          active.bassVoices[i].gain.gain.setTargetAtTime(
+            level * level * 0.32,
+            now,
+            0.05,
+          );
+        }
+
+        for (let band = 0; band < PERC; band++) {
           const raw = field[at(col, band)];
           const level = raw < SILENCE ? 0 : raw;
           if (level >= ONSET && lastDrum[band] < ONSET) {
@@ -536,7 +707,7 @@ import "../styles/global.css";
       function hushVoices(): void {
         if (!audio) return;
         const now = audio.ctx.currentTime;
-        for (const bank of audio.voices) {
+        for (const bank of [...audio.voices, ...audio.bassVoices]) {
           bank.gain.gain.cancelScheduledValues(now);
           bank.gain.gain.setTargetAtTime(0, now, 0.05);
         }
@@ -581,7 +752,8 @@ import "../styles/global.css";
         wipe: boolean,
         amount: number,
       ): void {
-        const drums = band < DRUM_BANDS;
+        const region = regionOf(band);
+        const drums = region === 0;
         if (snapping && !wipe && drums) col = snapCol(col);
 
         const spreadY = drums ? BRUSH_Y_DRUM : BRUSH_Y;
@@ -593,7 +765,7 @@ import "../styles/global.css";
           if (y < 0 || y >= BANDS) continue;
 
           // A note must never bleed into a drum, or a melody would play the kit.
-          if (drums !== y < DRUM_BANDS) continue;
+          if (regionOf(y) !== region) continue;
 
           for (let dx = -reachX; dx <= reachX; dx++) {
             const falloff = 1 - Math.hypot(dx / BRUSH_X, dy / spreadY);
@@ -641,7 +813,7 @@ import "../styles/global.css";
       }
 
       function stampGroove(id: string): void {
-        for (let band = 0; band < DRUM_BANDS; band++) {
+        for (let band = 0; band < PERC; band++) {
           for (let col = 0; col < FIELD_W; col++) field[at(col, band)] = 0;
         }
         for (const hit of byId(GROOVES, id).hits) {
@@ -726,7 +898,7 @@ import "../styles/global.css";
         shown.set(field);
         if (voicing) {
           const offsets = voiceOffsets(locked);
-          for (let band = DRUM_BANDS; band < BANDS; band++) {
+          for (let band = LEAD_FROM; band < BANDS; band++) {
             for (let col = 0; col < FIELD_W; col++) {
               const raw = field[at(col, band)];
               if (raw < SILENCE) continue;
@@ -771,7 +943,9 @@ import "../styles/global.css";
           height,
         );
 
-        const split = (BANDS - DRUM_BANDS) / BANDS;
+        // Region boundaries, as a fraction down from the top of the canvas.
+        const leadSplit = TONE_BANDS / BANDS; // lead ends, bass begins
+        const percSplit = (TONE_BANDS + BASS) / BANDS; // bass ends, kit begins
         const screenX = (col: number) =>
           (((col - scroll + FIELD_W) % FIELD_W) / FIELD_W) * width;
 
@@ -784,9 +958,9 @@ import "../styles/global.css";
                 : "rgba(255,255,255,0.04)";
             ctx2d.fillRect(
               screenX(swung),
-              split * height,
+              percSplit * height,
               1,
-              (1 - split) * height,
+              (1 - percSplit) * height,
             );
           }
         }
@@ -804,7 +978,9 @@ import "../styles/global.css";
         }
 
         ctx2d.fillStyle = "rgba(255,255,255,0.05)";
-        ctx2d.fillRect(0, split * height, width, 1);
+        // Two rules, so the three instruments are visibly separate territories.
+        ctx2d.fillRect(0, leadSplit * height, width, 1);
+        ctx2d.fillRect(0, percSplit * height, width, 1);
 
         const barX = BAR_FRAC * width;
         const glow = ctx2d.createLinearGradient(barX - 90, 0, barX, 0);
@@ -921,6 +1097,8 @@ import "../styles/global.css";
         const preset = byId(PRESETS, id);
 
         voice = byId(VOICES, preset.voice);
+        bass = byId(VOICES, preset.bass);
+        vowel = byId(VOWELS, preset.vowel);
         progression = byId(PROGRESSIONS, preset.progression);
         cutoff = preset.cutoff;
         resonance = preset.resonance;
@@ -931,6 +1109,8 @@ import "../styles/global.css";
         setLoop(preset.loop);
 
         setPick("voice", preset.voice);
+        setPick("bass", preset.bass);
+        setPick("vowel", preset.vowel);
         setPick("progression", preset.progression);
         setPick("groove", preset.groove);
         setKnob("cutoff", preset.cutoff);
@@ -949,6 +1129,7 @@ import "../styles/global.css";
         }
 
         applyVoice();
+        applyVowel();
         applyFilter();
         hushVoices();
         stampGroove(preset.groove);
@@ -980,6 +1161,14 @@ import "../styles/global.css";
             case "voice":
               voice = byId(VOICES, select.value);
               applyVoice();
+              break;
+            case "bass":
+              bass = byId(VOICES, select.value);
+              applyVoice();
+              break;
+            case "vowel":
+              vowel = byId(VOWELS, select.value);
+              applyVowel();
               break;
             case "progression":
               progression = byId(PROGRESSIONS, select.value);
@@ -1087,7 +1276,7 @@ import "../styles/global.css";
           let bestLevel = SILENCE;
 
           for (let i = 0; i < TONE_BANDS; i++) {
-            const level = levelAt(step, DRUM_BANDS + i);
+            const level = levelAt(step, LEAD_FROM + i);
             if (level > bestLevel) {
               bestLevel = level;
               best = i;
@@ -1117,7 +1306,7 @@ import "../styles/global.css";
         const beats: Beat[] = [];
 
         for (let step = 0; step < SUBDIVS; step++) {
-          for (let band = 0; band < DRUM_BANDS; band++) {
+          for (let band = 0; band < PERC; band++) {
             if (levelAt(step, band) >= ONSET) {
               beats.push({ step, band });
             }
@@ -1175,7 +1364,7 @@ import "../styles/global.css";
               1.1,
             );
 
-            eraseFrom(from, DRUM_BANDS, BANDS);
+            eraseFrom(from, LEAD_FROM, BANDS);
 
             // Back into the field by pitch, snapped to the nearest band so the
             // model can only ever land somewhere the instrument can play.
@@ -1195,7 +1384,7 @@ import "../styles/global.css";
               for (let s = 0; s < note.steps; s++) {
                 const step = note.step + s;
                 if (step >= SUBDIVS) break;
-                paint(colOfStep(step), DRUM_BANDS + band, false, 0.7);
+                paint(colOfStep(step), LEAD_FROM + band, false, 0.7);
               }
             }
             say(grown.length > 0 ? `${grown.length} notes` : "nothing came back");
@@ -1213,13 +1402,13 @@ import "../styles/global.css";
           const grown = await continueDrums(
             base,
             beats.filter((beat) => beat.step < from),
-            DRUM_MIDI,
+            drumMidi(),
             from,
             SUBDIVS - from,
             1.05,
           );
 
-          eraseFrom(from, 0, DRUM_BANDS);
+          eraseFrom(from, 0, PERC);
           let placed = 0;
           for (const hit of grown) {
             const band = bandForDrumMidi(hit.pitch);
