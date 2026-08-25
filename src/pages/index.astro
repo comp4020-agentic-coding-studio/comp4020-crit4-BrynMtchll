@@ -44,6 +44,12 @@ import "../styles/global.css";
 
       <div data-controls>
         <button type="button" data-clear>Clear</button>
+        <button type="button" data-toggle="chords" aria-pressed="true">
+          Chords
+        </button>
+        <button type="button" data-toggle="snap" aria-pressed="true">
+          Snap
+        </button>
         <p data-hint>Hold shift to rub out.</p>
       </div>
     </main>
@@ -84,6 +90,25 @@ import "../styles/global.css";
       // like it worked. Anything fainter is snapped to silence.
       const SILENCE = 0.04;
 
+      // Rhythm. The loop carries a grid of beats, and marks in the drum bands
+      // magnetise to it — a sloppy drag still lands on the pulse. Pitched
+      // bands are deliberately left free, so the beat locks while the melody
+      // stays drawn rather than quantised.
+      const BEATS = 16;
+      const BEAT_COLS = FIELD_W / BEATS;
+
+      // Harmony. A pitched mark also sounds these, quieter: three pentatonic
+      // steps up (a fifth or a sixth, depending where you are in the scale)
+      // and five steps up (the octave). Both are consonant everywhere in a
+      // pentatonic, so one careless line comes out as a chord.
+      const CHORD_UP = 3;
+      const CHORD_LEVEL = 0.5;
+      const OCTAVE_UP = 5;
+      const OCTAVE_LEVEL = 0.32;
+
+      let harmonise = true;
+      let snapping = true;
+
       const HEAT: [number, number, number][] = [
         [10, 12, 22],
         [40, 25, 92],
@@ -94,6 +119,13 @@ import "../styles/global.css";
       ];
 
       const field = new Float32Array(FIELD_W * BANDS);
+      const targets = new Float32Array(BANDS - DRUM_BANDS);
+
+      // What the display draws: the field plus the harmony notes the bar will
+      // add. Kept separate so the chord is visible without being paintable —
+      // anything audible has to be on screen, and a real spectrogram shows
+      // harmonics as fainter bands above the note anyway.
+      const shown = new Float32Array(FIELD_W * BANDS);
 
       type Voice = { osc: OscillatorNode; gain: GainNode };
       type Audio = {
@@ -256,9 +288,30 @@ import "../styles/global.css";
         const col = Math.floor(scroll + BAR_FRAC * FIELD_W) % FIELD_W;
         const now = active.ctx.currentTime;
 
-        for (let i = 0; i < active.voices.length; i++) {
+        // Gather what the bar is sitting on, voicing each mark as a chord
+        // before anything reaches a gain — so the harmony notes mix with
+        // whatever else is drawn there rather than stacking on top of it.
+        targets.fill(0);
+
+        for (let i = 0; i < targets.length; i++) {
           const raw = field[at(col, DRUM_BANDS + i)];
-          const level = raw < SILENCE ? 0 : raw;
+          if (raw < SILENCE) continue;
+
+          targets[i] = Math.min(1, targets[i] + raw);
+          if (!harmonise) continue;
+
+          const fifth = i + CHORD_UP;
+          const octave = i + OCTAVE_UP;
+          if (fifth < targets.length) {
+            targets[fifth] = Math.min(1, targets[fifth] + raw * CHORD_LEVEL);
+          }
+          if (octave < targets.length) {
+            targets[octave] = Math.min(1, targets[octave] + raw * OCTAVE_LEVEL);
+          }
+        }
+
+        for (let i = 0; i < active.voices.length; i++) {
+          const level = targets[i];
           active.voices[i].gain.gain.setTargetAtTime(
             level * level * 0.13,
             now,
@@ -296,6 +349,12 @@ import "../styles/global.css";
         wipe: boolean,
         amount: number,
       ): void {
+        // Drums land on the beat, notes land where they were drawn. Rubbing
+        // out is never snapped, or a stray beat would be unerasable.
+        if (snapping && !wipe && band < DRUM_BANDS) {
+          col = (Math.round(col / BEAT_COLS) * BEAT_COLS) % FIELD_W;
+        }
+
         const reachX = Math.ceil(BRUSH_X);
         const reachY = Math.ceil(BRUSH_Y);
 
@@ -416,10 +475,31 @@ import "../styles/global.css";
           }
         }
 
+        shown.set(field);
+        if (harmonise) {
+          for (let band = DRUM_BANDS; band < BANDS; band++) {
+            for (let col = 0; col < FIELD_W; col++) {
+              const raw = field[at(col, band)];
+              if (raw < SILENCE) continue;
+
+              const fifth = band + CHORD_UP;
+              const octave = band + OCTAVE_UP;
+              if (fifth < BANDS) {
+                const i = at(col, fifth);
+                shown[i] = Math.min(1, shown[i] + raw * CHORD_LEVEL);
+              }
+              if (octave < BANDS) {
+                const i = at(col, octave);
+                shown[i] = Math.min(1, shown[i] + raw * OCTAVE_LEVEL);
+              }
+            }
+          }
+        }
+
         for (let band = 0; band < BANDS; band++) {
           const row = (BANDS - 1 - band) * FIELD_W;
           for (let col = 0; col < FIELD_W; col++) {
-            heat(field[at(col, band)], offImage.data, (row + col) * 4);
+            heat(shown[at(col, band)], offImage.data, (row + col) * 4);
           }
         }
         offCtx.putImageData(offImage, 0, 0);
@@ -438,6 +518,20 @@ import "../styles/global.css";
         ctx2d.drawImage(off, 0, 0, scroll, BANDS, head * px, 0, scroll * px, height);
 
         const split = (BANDS - DRUM_BANDS) / BANDS;
+
+        // The beat grid belongs to the loop, not the screen, so it scrolls
+        // with the marks sitting on it. Every fourth beat is a bar line.
+        if (snapping) {
+          for (let beat = 0; beat < BEATS; beat++) {
+            const x =
+              (((beat * BEAT_COLS - scroll + FIELD_W) % FIELD_W) / FIELD_W) *
+              width;
+            ctx2d.fillStyle =
+              beat % 4 === 0 ? "rgba(255,255,255,0.14)" : "rgba(255,255,255,0.05)";
+            ctx2d.fillRect(x, split * height, 1, (1 - split) * height);
+          }
+        }
+
         ctx2d.fillStyle = "rgba(255,255,255,0.05)";
         ctx2d.fillRect(0, split * height, width, 1);
 
@@ -535,6 +629,17 @@ import "../styles/global.css";
       clearButton?.addEventListener("click", () => {
         field.fill(0);
       });
+
+      for (const button of document.querySelectorAll<HTMLElement>(
+        "[data-toggle]",
+      )) {
+        button.addEventListener("click", () => {
+          const on = button.getAttribute("aria-pressed") !== "true";
+          button.setAttribute("aria-pressed", String(on));
+          if (button.dataset.toggle === "chords") harmonise = on;
+          else snapping = on;
+        });
+      }
 
       draw();
 
