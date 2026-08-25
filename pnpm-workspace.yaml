@@ -1,3 +1,13 @@
-# esbuild (used by Vite) needs its postinstall to set up its native binary.
+# Which dependencies are allowed to run install scripts on this machine and in
+# CI. Anything not listed here is refused, which is the safe default: an
+# install script is arbitrary code running with your permissions.
+#
+# esbuild (used by Vite) genuinely needs its postinstall to set up its native
+# binary. The two that arrived with @magenta/music do not:
+#   core-js    — its postinstall only prints a funding notice
+#   protobufjs — its postinstall only prepares the CLI, and Magenta ships a
+#                pre-generated static protobuf module rather than using it
 allowBuilds:
+  core-js: false
   esbuild: true
+  protobufjs: false

@@ -20,24 +20,44 @@ export const SCALES: Scale[] = [
 // The pitch classes of A natural minor. Chords are checked against this.
 export const IN_KEY = [0, 2, 3, 5, 7, 8, 10];
 
-export type Chord = { name: string; tones: number[] };
+// `name` is what gets drawn on the loop; `symbol` is what a chord parser can
+// read. They differ where the nice-looking name is not machine-readable — the
+// half-diminished sign is the reason this field exists at all.
+export type Chord = { name: string; symbol: string; tones: number[] };
 
 // Tones ascend, so consecutive bands climb through the chord and then into the
 // next octave of it. A three-note chord simply repeats sooner than a four.
 export const CHORDS: Record<string, Chord> = {
-  Am7: { name: "Am7", tones: [0, 3, 7, 10] },
-  Am: { name: "Am", tones: [0, 3, 7] },
-  Fmaj7: { name: "Fmaj7", tones: [8, 12, 15, 19] },
-  F: { name: "F", tones: [8, 12, 15] },
-  Cmaj7: { name: "Cmaj7", tones: [3, 7, 10, 14] },
-  C: { name: "C", tones: [3, 7, 10] },
-  G7: { name: "G7", tones: [10, 14, 17, 20] },
-  G: { name: "G", tones: [10, 14, 17] },
-  Dm7: { name: "Dm7", tones: [5, 8, 12, 15] },
-  Dm: { name: "Dm", tones: [5, 8, 12] },
-  Em7: { name: "Em7", tones: [7, 10, 14, 17] },
-  Bdim: { name: "Bø", tones: [2, 5, 8, 12] },
+  Am7: { name: "Am7", symbol: "Am7", tones: [0, 3, 7, 10] },
+  Am: { name: "Am", symbol: "Am", tones: [0, 3, 7] },
+  Fmaj7: { name: "Fmaj7", symbol: "Fmaj7", tones: [8, 12, 15, 19] },
+  F: { name: "F", symbol: "F", tones: [8, 12, 15] },
+  Cmaj7: { name: "Cmaj7", symbol: "Cmaj7", tones: [3, 7, 10, 14] },
+  C: { name: "C", symbol: "C", tones: [3, 7, 10] },
+  G7: { name: "G7", symbol: "G7", tones: [10, 14, 17, 20] },
+  G: { name: "G", symbol: "G", tones: [10, 14, 17] },
+  Dm7: { name: "Dm7", symbol: "Dm7", tones: [5, 8, 12, 15] },
+  Dm: { name: "Dm", symbol: "Dm", tones: [5, 8, 12] },
+  Em7: { name: "Em7", symbol: "Em7", tones: [7, 10, 14, 17] },
+  Bdim: { name: "Bø", symbol: "Bm7b5", tones: [2, 5, 8, 12] },
 };
+
+// MIDI note for the key root, so pitches can cross into a model's vocabulary
+// and back. A2 is MIDI 45.
+export const KEY_MIDI = 45;
+
+// General MIDI drum pitches for the four bands, and the reverse map. A model
+// trained on a full kit answers with pitches this kit does not have, so the
+// reverse map folds the whole tom family onto one tom, and both hats onto one.
+export const DRUM_MIDI = [36, 45, 38, 42];
+
+export function bandForDrumMidi(pitch: number): number | null {
+  if (pitch === 35 || pitch === 36) return 0; // kick
+  if ([41, 43, 45, 47, 48, 50].includes(pitch)) return 1; // toms
+  if ([37, 38, 39, 40].includes(pitch)) return 2; // snare and rim
+  if ([42, 44, 46, 49, 51, 52, 53, 55, 57, 59].includes(pitch)) return 3; // metal
+  return null;
+}
 
 export type Progression = { id: string; name: string; bars: Chord[] };
 

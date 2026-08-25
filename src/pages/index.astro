@@ -59,6 +59,17 @@ import "../styles/global.css";
         <button type="button" data-clear>Clear</button>
       </div>
 
+      <!--
+        Continuation. Kept off the canvas and out of the way: a stranger who
+        never presses these loses nothing, and the model only downloads when
+        one of them is pressed for the first time.
+      -->
+      <div data-suggest>
+        <button type="button" data-continue="melody">Continue melody</button>
+        <button type="button" data-continue="drums">Continue drums</button>
+        <span data-status role="status" aria-live="polite"></span>
+      </div>
+
       <details data-desk>
         <summary>More</summary>
 
@@ -163,18 +174,23 @@ import "../styles/global.css";
 
     <script>
       import {
+        DRUM_MIDI,
         GROOVES,
         KEY_HZ,
+        KEY_MIDI,
         PRESETS,
         PROGRESSIONS,
         SCALES,
         SUBDIVS,
         VOICES,
+        bandForDrumMidi,
         byId,
         semitoneOf,
         swingOffset,
         voiceOffsets,
       } from "../lib/music";
+      import type { Beat, Note } from "../lib/suggest";
+      import { continueDrums, continueMelody } from "../lib/suggest";
 
       const canvas = document.querySelector<HTMLCanvasElement>("[data-grid]");
       const stage = document.querySelector<HTMLElement>("[data-stage]");
@@ -1025,6 +1041,209 @@ import "../styles/global.css";
             default:
               snapping = on;
           }
+        });
+      }
+
+      // ---- continuation -----------------------------------------------------
+
+      const status = document.querySelector<HTMLElement>("[data-status]");
+      let thinking = false;
+
+      function say(message: string): void {
+        if (status) status.textContent = message;
+      }
+
+      // Where a step of the loop lives. This has to be the same place the grid
+      // snaps to, not the middle of the gap after it: the brush is narrower
+      // than a subdivision, so reading half a subdivision late looks just past
+      // every mark and reports an empty loop.
+      const colOfStep = (step: number) =>
+        (Math.round(step * SUB_COLS) + FIELD_W) % FIELD_W;
+
+      // The loudest thing anywhere in a step's window. Marks drawn by hand do
+      // not land on the grid, and swing moves the snapped ones off it, so a
+      // single-column probe would miss most of what is actually there.
+      function levelAt(step: number, band: number): number {
+        const centre = colOfStep(step);
+        const reach = Math.floor(SUB_COLS / 2);
+        let best = 0;
+
+        for (let d = -reach; d <= reach; d++) {
+          const level = field[at((centre + d + FIELD_W) % FIELD_W, band)];
+          if (level > best) best = level;
+        }
+        return best;
+      }
+
+      // Reads the drawing back out as notes. The models are monophonic for
+      // melody, so where a column holds a stack only its loudest band is taken.
+      function readMelody(): { notes: Note[] } {
+        const notes: Note[] = [];
+        let open: Note | null = null;
+
+        for (let step = 0; step < SUBDIVS; step++) {
+          const col = colOfStep(step);
+          let best = -1;
+          let bestLevel = SILENCE;
+
+          for (let i = 0; i < TONE_BANDS; i++) {
+            const level = levelAt(step, DRUM_BANDS + i);
+            if (level > bestLevel) {
+              bestLevel = level;
+              best = i;
+            }
+          }
+
+          if (best < 0) {
+            open = null;
+            continue;
+          }
+
+          const pitch =
+            KEY_MIDI + semitoneOf(best, tonesFor(chordAt(col)));
+
+          // A pitch that carries on is one note, not one per step.
+          if (open && open.pitch === pitch && open.step + open.steps === step) {
+            open.steps += 1;
+          } else {
+            open = { step, steps: 1, pitch };
+            notes.push(open);
+          }
+        }
+        return { notes };
+      }
+
+      function readDrums(): { beats: Beat[] } {
+        const beats: Beat[] = [];
+
+        for (let step = 0; step < SUBDIVS; step++) {
+          for (let band = 0; band < DRUM_BANDS; band++) {
+            if (levelAt(step, band) >= ONSET) {
+              beats.push({ step, band });
+            }
+          }
+        }
+        return { beats };
+      }
+
+      function eraseFrom(step: number, lowBand: number, highBand: number) {
+        for (let s = step; s < SUBDIVS; s++) {
+          const centre = colOfStep(s);
+          for (let d = -Math.ceil(SUB_COLS / 2); d <= SUB_COLS / 2; d++) {
+            const col = (centre + d + FIELD_W) % FIELD_W;
+            for (let band = lowBand; band < highBand; band++) {
+              field[at(col, band)] = 0;
+            }
+          }
+        }
+      }
+
+      // Call and response: the front half of the loop is the prompt, the back
+      // half is what the model answers with. Fixed rather than "wherever the
+      // drawing happens to stop", because that left it as few as seven steps
+      // to work with and the answer came back empty.
+      const HANDOVER = Math.floor(SUBDIVS / 2);
+
+      async function suggest(kind: string): Promise<void> {
+        if (thinking) return;
+        thinking = true;
+
+        try {
+          start();
+          const base = import.meta.env.BASE_URL;
+
+          if (kind === "melody") {
+            const { notes } = readMelody();
+            if (notes.length === 0) {
+              say("draw a few notes first");
+              return;
+            }
+
+            const from = HANDOVER;
+            const chords: string[] = [];
+            for (let step = from; step < SUBDIVS; step++) {
+              chords.push(progression.bars[chordAt(colOfStep(step))].symbol);
+            }
+
+            say("thinking…");
+            const seed = notes.filter((note) => note.step < from);
+            const grown = await continueMelody(
+              base,
+              seed.length > 0 ? seed : notes,
+              chords,
+              from,
+              1.1,
+            );
+
+            eraseFrom(from, DRUM_BANDS, BANDS);
+
+            // Back into the field by pitch, snapped to the nearest band so the
+            // model can only ever land somewhere the instrument can play.
+            for (const note of grown) {
+              const tones = tonesFor(chordAt(colOfStep(note.step)));
+              let band = 0;
+              let closest = Infinity;
+              for (let i = 0; i < TONE_BANDS; i++) {
+                const gap = Math.abs(
+                  KEY_MIDI + semitoneOf(i, tones) - note.pitch,
+                );
+                if (gap < closest) {
+                  closest = gap;
+                  band = i;
+                }
+              }
+              for (let s = 0; s < note.steps; s++) {
+                const step = note.step + s;
+                if (step >= SUBDIVS) break;
+                paint(colOfStep(step), DRUM_BANDS + band, false, 0.7);
+              }
+            }
+            say(grown.length > 0 ? `${grown.length} notes` : "nothing came back");
+            return;
+          }
+
+          const { beats } = readDrums();
+          if (beats.length === 0) {
+            say("draw some drums first");
+            return;
+          }
+
+          const from = HANDOVER;
+          say("thinking…");
+          const grown = await continueDrums(
+            base,
+            beats.filter((beat) => beat.step < from),
+            DRUM_MIDI,
+            from,
+            SUBDIVS - from,
+            1.05,
+          );
+
+          eraseFrom(from, 0, DRUM_BANDS);
+          let placed = 0;
+          for (const hit of grown) {
+            const band = bandForDrumMidi(hit.pitch);
+            if (band === null || hit.step >= SUBDIVS) continue;
+            paint(colOfStep(hit.step), band, false, 0.8);
+            placed++;
+          }
+          say(placed > 0 ? `${placed} hits` : "nothing came back");
+        } catch (error) {
+          // Frozen library, vendored weights: if any of it gives up, the
+          // instrument must not.
+          say("the model did not load");
+          console.error(error);
+        } finally {
+          thinking = false;
+        }
+      }
+
+      for (const button of document.querySelectorAll<HTMLElement>(
+        "[data-continue]",
+      )) {
+        button.addEventListener("click", () => {
+          stage?.setAttribute("data-touched", "");
+          void suggest(button.dataset.continue ?? "");
         });
       }
 

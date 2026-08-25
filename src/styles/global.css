@@ -103,6 +103,17 @@ h1 {
   align-items: center;
 }
 
+[data-suggest] {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+[data-status] {
+  font-size: 0.8rem;
+  opacity: 0.5;
+}
+
 [data-desk] {
   font-size: 0.85rem;
 }
