@@ -78,6 +78,12 @@ import "../styles/global.css";
       const ONSET = 0.18; // a drum fires when its band crosses this at the bar
       const AUDIO_TICK_MS = 10;
 
+      // Below this a mark is too faint to see against the background, so it
+      // must not be able to make a sound either — otherwise the loop can hold
+      // audible content that is invisible, and no amount of rubbing out looks
+      // like it worked. Anything fainter is snapped to silence.
+      const SILENCE = 0.04;
+
       const HEAT: [number, number, number][] = [
         [10, 12, 22],
         [40, 25, 92],
@@ -251,7 +257,8 @@ import "../styles/global.css";
         const now = active.ctx.currentTime;
 
         for (let i = 0; i < active.voices.length; i++) {
-          const level = field[at(col, DRUM_BANDS + i)];
+          const raw = field[at(col, DRUM_BANDS + i)];
+          const level = raw < SILENCE ? 0 : raw;
           active.voices[i].gain.gain.setTargetAtTime(
             level * level * 0.13,
             now,
@@ -260,7 +267,8 @@ import "../styles/global.css";
         }
 
         for (let band = 0; band < DRUM_BANDS; band++) {
-          const level = field[at(col, band)];
+          const raw = field[at(col, band)];
+          const level = raw < SILENCE ? 0 : raw;
           if (level >= ONSET && lastDrum[band] < ONSET) {
             drum(active, band, now, level);
           }
@@ -305,9 +313,16 @@ import "../styles/global.css";
             const i = at(x, y);
             const add = amount * falloff;
 
-            field[i] = wipe
-              ? Math.max(0, field[i] - add * 2.5)
-              : Math.min(1, field[i] + add);
+            // Rubbing out snaps to true zero rather than leaving a tail that
+            // is too faint to see but not quite silent. Building up does not
+            // apply the floor, or the soft edge of the brush could never
+            // accumulate past it.
+            if (wipe) {
+              const next = field[i] - add * 2.5;
+              field[i] = next < SILENCE ? 0 : next;
+            } else {
+              field[i] = Math.min(1, field[i] + add);
+            }
           }
         }
       }
