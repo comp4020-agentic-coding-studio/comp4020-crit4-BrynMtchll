@@ -112,17 +112,24 @@ export const VOICES: Voice[] = [
 // The kit, bottom up. Ordered by pitch so the spectrogram reading still holds:
 // the lower you draw, the lower it sounds. `midi` is the General MIDI drum this
 // band stands for, which is how a model trained on a real kit can talk to it.
-export type Percussion = { id: string; name: string; midi: number };
+// `short` is what fits down the left edge of the loop, where a band is only
+// about ten pixels tall and a full name overlaps its neighbours.
+export type Percussion = {
+  id: string;
+  name: string;
+  short: string;
+  midi: number;
+};
 
 export const PERCUSSION: Percussion[] = [
-  { id: "sub", name: "Sub", midi: 35 },
-  { id: "kick", name: "Kick", midi: 36 },
-  { id: "tom", name: "Tom", midi: 45 },
-  { id: "snare", name: "Snare", midi: 38 },
-  { id: "clap", name: "Clap", midi: 39 },
-  { id: "rim", name: "Rim", midi: 37 },
-  { id: "hat", name: "Hat", midi: 42 },
-  { id: "open", name: "Open hat", midi: 46 },
+  { id: "sub", name: "Sub", short: "SUB", midi: 35 },
+  { id: "kick", name: "Kick", short: "KCK", midi: 36 },
+  { id: "tom", name: "Tom", short: "TOM", midi: 45 },
+  { id: "snare", name: "Snare", short: "SNR", midi: 38 },
+  { id: "clap", name: "Clap", short: "CLP", midi: 39 },
+  { id: "rim", name: "Rim", short: "RIM", midi: 37 },
+  { id: "hat", name: "Hat", short: "HAT", midi: 42 },
+  { id: "open", name: "Open hat", short: "OPN", midi: 46 },
 ];
 
 export const SUB = 0;
@@ -135,6 +142,112 @@ export const HAT = 6;
 export const OPEN = 7;
 
 export const PERC_BANDS = PERCUSSION.length;
+
+// One key per piece, left to right along the home row, low to high. Playing a
+// pad and recording it are the same gesture on a drum machine, so a press both
+// sounds now and writes itself into the loop.
+export const DRUM_KEYS = ["a", "s", "d", "f", "g", "h", "j", "k"];
+
+// Melodic templates, written as degrees of whatever is in force — so a phrase
+// is a shape, not a tune, and the same shape lands in key against every chord
+// and every scale. This is what makes "plug something in and it sounds right"
+// true rather than lucky.
+export type PhraseNote = { step: number; degree: number; steps: number };
+export type Phrase = { id: string; name: string; notes: PhraseNote[] };
+
+const walk = (
+  degrees: number[],
+  every: number,
+  length: number,
+): PhraseNote[] =>
+  degrees.map((degree, i) => ({ step: i * every, degree, steps: length }));
+
+export const PHRASES: Phrase[] = [
+  { id: "rise", name: "Rise", notes: walk([0, 1, 2, 3, 4, 5, 6, 7], 4, 3) },
+  { id: "fall", name: "Fall", notes: walk([7, 6, 5, 4, 3, 2, 1, 0], 4, 3) },
+  { id: "arch", name: "Arch", notes: walk([0, 2, 4, 6, 7, 6, 4, 2], 4, 3) },
+  { id: "wander", name: "Wander", notes: walk([2, 4, 3, 5, 4, 6, 5, 3], 4, 3) },
+  {
+    id: "pulse",
+    name: "Pulse",
+    notes: walk([4, 4, 4, 5, 4, 4, 4, 3, 4, 4, 4, 5, 4, 4, 4, 2], 2, 1),
+  },
+  {
+    id: "hook",
+    name: "Hook",
+    notes: [
+      { step: 0, degree: 4, steps: 2 },
+      { step: 3, degree: 5, steps: 1 },
+      { step: 6, degree: 3, steps: 2 },
+      { step: 8, degree: 4, steps: 2 },
+      { step: 11, degree: 6, steps: 1 },
+      { step: 14, degree: 5, steps: 2 },
+      { step: 16, degree: 4, steps: 2 },
+      { step: 19, degree: 5, steps: 1 },
+      { step: 22, degree: 7, steps: 2 },
+      { step: 24, degree: 6, steps: 2 },
+      { step: 27, degree: 4, steps: 1 },
+      { step: 30, degree: 2, steps: 2 },
+    ],
+  },
+  {
+    id: "hold",
+    name: "Hold",
+    notes: [
+      { step: 0, degree: 0, steps: 15 },
+      { step: 16, degree: 4, steps: 15 },
+    ],
+  },
+  {
+    id: "answer",
+    name: "Answer",
+    notes: [
+      { step: 0, degree: 2, steps: 3 },
+      { step: 4, degree: 4, steps: 3 },
+      { step: 8, degree: 6, steps: 6 },
+      { step: 18, degree: 5, steps: 3 },
+      { step: 22, degree: 3, steps: 3 },
+      { step: 26, degree: 1, steps: 5 },
+    ],
+  },
+];
+
+// Bass templates. Deliberately plainer than the melodies: a bass line that
+// moves too much stops holding the harmony down.
+export const BASS_LINES: Phrase[] = [
+  {
+    id: "root",
+    name: "Root",
+    notes: [
+      { step: 0, degree: 0, steps: 7 },
+      { step: 8, degree: 0, steps: 7 },
+      { step: 16, degree: 0, steps: 7 },
+      { step: 24, degree: 0, steps: 7 },
+    ],
+  },
+  {
+    id: "octave",
+    name: "Octave",
+    notes: walk([0, 0, 2, 0, 0, 0, 2, 0], 4, 3),
+  },
+  {
+    id: "walk",
+    name: "Walk",
+    notes: walk([0, 1, 2, 3], 8, 7),
+  },
+  {
+    id: "push",
+    name: "Push",
+    notes: [
+      { step: 0, degree: 0, steps: 3 },
+      { step: 6, degree: 0, steps: 2 },
+      { step: 10, degree: 1, steps: 3 },
+      { step: 16, degree: 0, steps: 3 },
+      { step: 22, degree: 0, steps: 2 },
+      { step: 26, degree: 2, steps: 4 },
+    ],
+  },
+];
 
 // Bands given to the bass: the chord's own tones, an octave below the melody
 // register, on a separate synth. Bass is most of what makes a loop sound like

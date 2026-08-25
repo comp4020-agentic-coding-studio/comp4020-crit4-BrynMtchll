@@ -1,10 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  BASS_BANDS,
+  BASS_LINES,
   CHORDS,
+  DRUM_KEYS,
   GROOVES,
   IN_KEY,
   PERCUSSION,
   PERC_BANDS,
+  PHRASES,
   PRESETS,
   PROGRESSIONS,
   SUBDIVS,
@@ -182,6 +186,57 @@ describe("the kit", () => {
       if (band === null) continue;
       expect(band, `pitch ${pitch}`).toBeGreaterThanOrEqual(0);
       expect(band, `pitch ${pitch}`).toBeLessThan(PERC_BANDS);
+    }
+  });
+});
+
+describe("templates you plug in", () => {
+  // A phrase is a shape in degrees, not a tune in pitches, which is what lets
+  // the same phrase land in key against every chord. These check the shape is
+  // playable: inside the loop, and inside the region it is written into.
+  const banks: [string, typeof PHRASES, number][] = [
+    ["phrase", PHRASES, 16],
+    ["bass line", BASS_LINES, BASS_BANDS],
+  ];
+
+  for (const [kind, bank, bands] of banks) {
+    it(`every ${kind} fits its loop and its region`, () => {
+      for (const item of bank) {
+        expect(item.notes.length, `${item.id} is empty`).toBeGreaterThan(0);
+        for (const note of item.notes) {
+          expect(note.step, `${item.id}`).toBeGreaterThanOrEqual(0);
+          expect(note.step, `${item.id} starts past the loop`).toBeLessThan(
+            SUBDIVS,
+          );
+          expect(note.steps, `${item.id} has a zero-length note`).toBeGreaterThan(0);
+          expect(note.degree, `${item.id}`).toBeGreaterThanOrEqual(0);
+          expect(
+            note.degree,
+            `${item.id} reaches past the ${kind} region`,
+          ).toBeLessThan(bands);
+        }
+      }
+    });
+
+    it(`no ${kind} overlaps itself on one degree`, () => {
+      for (const item of bank) {
+        const busy = new Set<string>();
+        for (const note of item.notes) {
+          for (let s = 0; s < note.steps; s++) {
+            const key = `${note.degree}:${note.step + s}`;
+            expect(busy.has(key), `${item.id} overlaps at ${key}`).toBe(false);
+            busy.add(key);
+          }
+        }
+      }
+    });
+  }
+
+  it("gives the kit one key per piece, all distinct", () => {
+    expect(DRUM_KEYS).toHaveLength(PERC_BANDS);
+    expect(new Set(DRUM_KEYS).size).toBe(DRUM_KEYS.length);
+    for (const key of DRUM_KEYS) {
+      expect(key, `${key} is not a single lowercase letter`).toMatch(/^[a-z]$/);
     }
   });
 });

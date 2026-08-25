@@ -7,7 +7,11 @@
 body {
   display: flex;
   flex-direction: column;
-  height: 100dvh;
+
+  /* min-height, not height: with three banks of templates below it the loop
+     would otherwise be crushed into ten-pixel bands on a short window, and the
+     phone viewport this is marked at is short. Scrolling beats illegible. */
+  min-height: 100dvh;
   margin: 0;
   font-family: system-ui, sans-serif;
   line-height: 1.6;
@@ -45,7 +49,7 @@ main {
 [data-stage] {
   position: relative;
   flex: 1;
-  min-height: 0;
+  min-height: 16rem;
   overflow: hidden;
   border: 1px solid var(--edge);
   border-radius: 0.5rem;
@@ -107,6 +111,37 @@ h1 {
   display: flex;
   gap: 0.4rem;
   align-items: center;
+}
+
+[data-bank] {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  align-items: center;
+}
+
+[data-label] {
+  width: 3.5rem;
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  opacity: 0.4;
+}
+
+[data-keys] {
+  margin: 0;
+  font-size: 0.78rem;
+  opacity: 0.45;
+}
+
+kbd {
+  display: inline-block;
+  padding: 0.05rem 0.3rem;
+  margin-right: 0.15rem;
+  font-family: ui-monospace, sfmono-regular, menlo, monospace;
+  font-size: 0.72rem;
+  border: 1px solid var(--edge);
+  border-radius: 0.2rem;
 }
 
 [data-status] {
@@ -181,6 +216,12 @@ button {
 button:hover,
 button:focus-visible {
   border-color: var(--ink);
+}
+
+/* Smaller than the presets: these are a palette, not the headline control. */
+[data-bank] button {
+  padding: 0.2rem 0.55rem;
+  font-size: 0.78rem;
 }
 
 button[aria-pressed="true"] {

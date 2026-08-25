@@ -1,6 +1,8 @@
 ---
 import {
+  BASS_LINES,
   GROOVES,
+  PHRASES,
   PRESETS,
   PROGRESSIONS,
   SCALES,
@@ -77,6 +79,50 @@ import "../styles/global.css";
         <span data-status role="status" aria-live="polite"></span>
       </div>
 
+      <!--
+        Things to plug in. Each of these writes into one region and leaves the
+        others alone, so a beat, a bass line and a phrase can be stacked in
+        three clicks and then drawn over.
+      -->
+      <div data-bank role="group" aria-label="Beats">
+        <span data-label>Beat</span>
+        {
+          GROOVES.map((groove) => (
+            <button type="button" data-groove={groove.id}>
+              {groove.name}
+            </button>
+          ))
+        }
+      </div>
+
+      <div data-bank role="group" aria-label="Bass lines">
+        <span data-label>Bass</span>
+        {
+          BASS_LINES.map((line) => (
+            <button type="button" data-bassline={line.id}>
+              {line.name}
+            </button>
+          ))
+        }
+      </div>
+
+      <div data-bank role="group" aria-label="Phrases">
+        <span data-label>Phrase</span>
+        {
+          PHRASES.map((phrase) => (
+            <button type="button" data-phrase={phrase.id}>
+              {phrase.name}
+            </button>
+          ))
+        }
+      </div>
+
+      <p data-keys>
+        <kbd>A</kbd><kbd>S</kbd><kbd>D</kbd><kbd>F</kbd><kbd>G</kbd><kbd>H</kbd
+        ><kbd>J</kbd><kbd>K</kbd> play the kit — a press sounds now and records
+        itself on the beat.
+      </p>
+
       <details data-desk>
         <summary>More</summary>
 
@@ -115,13 +161,6 @@ import "../styles/global.css";
             Scale
             <select data-pick="scale">
               {SCALES.map((s) => <option value={s.id}>{s.name}</option>)}
-            </select>
-          </label>
-
-          <label>
-            Groove
-            <select data-pick="groove">
-              {GROOVES.map((g) => <option value={g.id}>{g.name}</option>)}
             </select>
           </label>
 
@@ -196,7 +235,10 @@ import "../styles/global.css";
     <script>
       import {
         BASS_BANDS,
+        BASS_LINES,
+        DRUM_KEYS,
         GROOVES,
+        PHRASES,
         KEY_HZ,
         KEY_MIDI,
         PRESETS,
@@ -822,6 +864,26 @@ import "../styles/global.css";
         }
       }
 
+      // Writes a template into one region and clears only that region, so
+      // plugging in a phrase never disturbs the beat under it.
+      function stampPhrase(
+        notes: { step: number; degree: number; steps: number }[],
+        from: number,
+        bands: number,
+      ): void {
+        for (let band = from; band < from + bands; band++) {
+          for (let col = 0; col < FIELD_W; col++) field[at(col, band)] = 0;
+        }
+        for (const note of notes) {
+          const band = from + (note.degree % bands);
+          for (let s = 0; s < note.steps; s++) {
+            const step = note.step + s;
+            if (step >= SUBDIVS) break;
+            paint(colOfStep(step), band, false, s === 0 ? 0.75 : 0.16);
+          }
+        }
+      }
+
       function fieldFromScreen(
         clientX: number,
         clientY: number,
@@ -981,6 +1043,28 @@ import "../styles/global.css";
         // Two rules, so the three instruments are visibly separate territories.
         ctx2d.fillRect(0, leadSplit * height, width, 1);
         ctx2d.fillRect(0, percSplit * height, width, 1);
+
+        // Names down the left edge, pinned to the screen rather than scrolling
+        // with the loop. Without them the kit is eight anonymous stripes and
+        // nobody finds the clap.
+        // Abbreviated, and only when a band is tall enough to hold a line of
+        // type. At ten pixels a band, full names sit on top of each other and
+        // read as noise rather than as labels.
+        const bandH = height / BANDS;
+        if (bandH >= 9) {
+          ctx2d.font = "500 8px ui-monospace, SFMono-Regular, Menlo, monospace";
+          ctx2d.fillStyle = "rgba(255,255,255,0.38)";
+          for (let band = 0; band < PERC; band++) {
+            ctx2d.fillText(
+              PERCUSSION[band].short,
+              5,
+              (BANDS - 1 - band) * bandH + bandH / 2 + 3,
+            );
+          }
+          ctx2d.fillStyle = "rgba(255,255,255,0.24)";
+          ctx2d.fillText("BASS", 5, TONE_BANDS * bandH + 10);
+          ctx2d.fillText("LEAD", 5, 11);
+        }
 
         const barX = BAR_FRAC * width;
         const glow = ctx2d.createLinearGradient(barX - 90, 0, barX, 0);
@@ -1178,9 +1262,6 @@ import "../styles/global.css";
               scale = byId(SCALES, select.value);
               tunedTo = -1;
               break;
-            default:
-              start();
-              stampGroove(select.value);
           }
         });
       }
@@ -1435,6 +1516,81 @@ import "../styles/global.css";
           void suggest(button.dataset.continue ?? "");
         });
       }
+
+      // Plugging things in. Each bank writes one region, so a beat, a bass
+      // line and a phrase stack rather than overwrite one another.
+      for (const button of document.querySelectorAll<HTMLElement>(
+        "[data-groove]",
+      )) {
+        button.addEventListener("click", () => {
+          stage?.setAttribute("data-touched", "");
+          start();
+          stampGroove(button.dataset.groove ?? "");
+        });
+      }
+
+      for (const button of document.querySelectorAll<HTMLElement>(
+        "[data-bassline]",
+      )) {
+        button.addEventListener("click", () => {
+          stage?.setAttribute("data-touched", "");
+          start();
+          stampPhrase(
+            byId(BASS_LINES, button.dataset.bassline ?? "").notes,
+            BASS_FROM,
+            BASS,
+          );
+        });
+      }
+
+      for (const button of document.querySelectorAll<HTMLElement>(
+        "[data-phrase]",
+      )) {
+        button.addEventListener("click", () => {
+          stage?.setAttribute("data-touched", "");
+          start();
+          stampPhrase(
+            byId(PHRASES, button.dataset.phrase ?? "").notes,
+            LEAD_FROM,
+            TONE_BANDS,
+          );
+        });
+      }
+
+      // The kit on the keyboard. Listened for on the window rather than the
+      // canvas: a pad you have to click into first is not a pad. A press
+      // sounds immediately and writes itself at the play bar, quantised like
+      // any other drum — which is what a drum machine does when you record.
+      window.addEventListener("keydown", (event) => {
+        if (event.metaKey || event.ctrlKey || event.altKey || event.repeat) {
+          return;
+        }
+        const target = event.target as HTMLElement | null;
+        if (target && /^(INPUT|SELECT|TEXTAREA|BUTTON)$/.test(target.tagName)) {
+          return;
+        }
+
+        const band = DRUM_KEYS.indexOf(event.key.toLowerCase());
+        if (band < 0) return;
+        event.preventDefault();
+
+        stage?.setAttribute("data-touched", "");
+        const active = start();
+
+        drum(active, band, active.ctx.currentTime, 0.85);
+
+        const scroll = Math.max(0, position());
+        paint(
+          Math.floor(scroll + BAR_FRAC * FIELD_W) % FIELD_W,
+          band,
+          false,
+          TAP,
+        );
+
+        // It has already sounded, so stop the bar from playing it a second
+        // time as it crosses the mark that was just written.
+        lastDrum[band] = 1;
+      });
 
       draw();
 
