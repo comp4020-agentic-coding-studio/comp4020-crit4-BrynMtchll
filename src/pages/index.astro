@@ -9,7 +9,7 @@ import "../styles/global.css";
     <title>Carousel</title>
     <meta
       name="description"
-      content="Draw a spectrogram and hear it. The loop scrolls left into a play bar, sounding whatever you painted — low is drums, high is notes, and it comes round again."
+      content="Draw a spectrogram and hear it. The loop scrolls into a play bar over a chord progression — low is drums, high is notes, and every mark lands in key."
     />
 
     <!--
@@ -47,6 +47,10 @@ import "../styles/global.css";
         <button type="button" data-toggle="chords" aria-pressed="true">
           Chords
         </button>
+        <button type="button" data-toggle="voice" aria-pressed="true">
+          Voicing
+        </button>
+        <button type="button" data-toggle="arp" aria-pressed="false">Arp</button>
         <button type="button" data-toggle="snap" aria-pressed="true">
           Snap
         </button>
@@ -60,72 +64,61 @@ import "../styles/global.css";
       const clearButton = document.querySelector<HTMLElement>("[data-clear]");
 
       // The loop is a field of intensities: FIELD_W slices of time by BANDS of
-      // pitch. It is deliberately much finer than a step sequencer's grid —
-      // nothing is quantised, so a stroke lands where it was drawn and a note
-      // is however long you drew it.
+      // pitch. Deliberately much finer than a step sequencer's grid — nothing
+      // about a drawn note's length or loudness is quantised.
       const FIELD_W = 512;
-      const BANDS = 24;
-      const DRUM_BANDS = 3; // lowest three: kick, snare, hat
+      const BANDS = 20;
+      const DRUM_BANDS = 4; // bottom up: kick, tom, snare, hat
       const TONE_BANDS = BANDS - DRUM_BANDS;
 
       const LOOP_S = 6;
       const BAR_FRAC = 0.18; // the play bar, as a fraction of the width
 
-      const ROOT_HZ = 110;
-      const PENTATONIC = [0, 3, 5, 7, 10];
+      // Structure. Four bars to the loop, eight subdivisions to the bar, so
+      // drums can be placed to a thirty-second of the loop.
+      const BARS = 4;
+      const SUBDIVS = BARS * 8;
+      const SUB_COLS = FIELD_W / SUBDIVS;
+      const BAR_COLS = FIELD_W / BARS;
 
-      // The brush, in field units. Wide in time and narrow in pitch, so a
-      // sideways drag draws a line rather than a smear across the scale.
+      // A minor, and a progression that never leaves it. Sevenths rather than
+      // triads: four notes fill the bands evenly and the extra tone is what
+      // makes a held chord sound considered rather than plain.
+      const KEY_HZ = 110; // A2
+      const MINOR = [0, 2, 3, 5, 7, 8, 10];
+      const PROGRESSION = [
+        { name: "Am7", tones: [0, 3, 7, 10] },
+        { name: "Fmaj7", tones: [8, 12, 15, 19] },
+        { name: "Cmaj7", tones: [3, 7, 10, 14] },
+        { name: "G7", tones: [10, 14, 17, 20] },
+      ];
+
+      // Voicing a single mark as a chord. In chord mode the neighbouring bands
+      // are already the next chord tones, so +1 and +2 build the real chord.
+      // In scale mode the same job needs a diatonic third and fifth, which is
+      // +2 and +4 scale degrees.
+      const VOICE_LEVELS = [0.5, 0.32];
+
       const BRUSH_X = 7;
       const BRUSH_Y = 1.3;
-      const TAP = 0.45; // one deliberate press
-      const FLOW = 0.09; // added each frame the brush is held down
+      const TAP = 0.45;
+      const FLOW = 0.09;
 
-      const ONSET = 0.18; // a drum fires when its band crosses this at the bar
+      const ONSET = 0.18;
       const AUDIO_TICK_MS = 10;
 
       // Below this a mark is too faint to see against the background, so it
-      // must not be able to make a sound either — otherwise the loop can hold
-      // audible content that is invisible, and no amount of rubbing out looks
-      // like it worked. Anything fainter is snapped to silence.
+      // must not be able to make a sound either.
       const SILENCE = 0.04;
 
-      // Rhythm. The loop carries a grid of beats, and marks in the drum bands
-      // magnetise to it — a sloppy drag still lands on the pulse. Pitched
-      // bands are deliberately left free, so the beat locks while the melody
-      // stays drawn rather than quantised.
-      const BEATS = 16;
-      const BEAT_COLS = FIELD_W / BEATS;
-
-      // Harmony. A pitched mark also sounds these, quieter: three pentatonic
-      // steps up (a fifth or a sixth, depending where you are in the scale)
-      // and five steps up (the octave). Both are consonant everywhere in a
-      // pentatonic, so one careless line comes out as a chord.
-      const CHORD_UP = 3;
-      const CHORD_LEVEL = 0.5;
-      const OCTAVE_UP = 5;
-      const OCTAVE_LEVEL = 0.32;
-
-      let harmonise = true;
-      let snapping = true;
-
-      const HEAT: [number, number, number][] = [
-        [10, 12, 22],
-        [40, 25, 92],
-        [128, 38, 130],
-        [220, 74, 96],
-        [246, 150, 60],
-        [255, 240, 170],
-      ];
-
       const field = new Float32Array(FIELD_W * BANDS);
-      const targets = new Float32Array(BANDS - DRUM_BANDS);
-
-      // What the display draws: the field plus the harmony notes the bar will
-      // add. Kept separate so the chord is visible without being paintable —
-      // anything audible has to be on screen, and a real spectrogram shows
-      // harmonics as fainter bands above the note anyway.
+      const targets = new Float32Array(TONE_BANDS);
       const shown = new Float32Array(FIELD_W * BANDS);
+
+      let harmonise = true; // bands locked to the progression
+      let voicing = true; // one mark sounds as a chord
+      let arping = false; // chords read out a tone at a time
+      let snapping = true; // drums magnetise to the grid
 
       type Voice = { osc: OscillatorNode; gain: GainNode };
       type Audio = {
@@ -148,11 +141,11 @@ import "../styles/global.css";
       let cursorBand = DRUM_BANDS + 4;
       let showCursor = false;
 
+      let tunedTo = -1;
+      let lastSub = -1;
+      let arpStep = 0;
       const lastDrum = new Float32Array(DRUM_BANDS);
 
-      // The offscreen field, one pixel per cell. Scaling this up with smoothing
-      // on is what makes the display read as a continuous spectrogram rather
-      // than a grid of tiles.
       const off = document.createElement("canvas");
       off.width = FIELD_W;
       off.height = BANDS;
@@ -163,15 +156,30 @@ import "../styles/global.css";
         return band * FIELD_W + col;
       }
 
-      // ---- sound ------------------------------------------------------------
+      // ---- the musical layout ------------------------------------------------
 
-      function pitchOf(band: number): number {
-        const step = band - DRUM_BANDS;
-        const semitones =
-          Math.floor(step / PENTATONIC.length) * 12 +
-          PENTATONIC[step % PENTATONIC.length];
-        return ROOT_HZ * 2 ** (semitones / 12);
+      // Which chord is in force at a given column of the loop.
+      function chordAt(col: number): number {
+        return Math.floor(col / BAR_COLS) % BARS;
       }
+
+      // Where a band sits, in semitones above the key. With the progression
+      // locked in, consecutive bands are consecutive chord tones, so the whole
+      // keyboard moves with the harmony. Unlocked, they are scale degrees.
+      function semitoneOf(index: number, chord: number): number {
+        if (harmonise) {
+          const tones = PROGRESSION[chord].tones;
+          return tones[index % 4] + 12 * Math.floor(index / 4);
+        }
+        return MINOR[index % 7] + 12 * Math.floor(index / 7);
+      }
+
+      // The two bands that voice a mark as a chord.
+      function voiceOffsets(): [number, number] {
+        return harmonise ? [1, 2] : [2, 4];
+      }
+
+      // ---- sound ------------------------------------------------------------
 
       function makeNoise(ctx: AudioContext): AudioBuffer {
         const buffer = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate);
@@ -186,8 +194,6 @@ import "../styles/global.css";
         const ctx = new AudioContext();
         const master = ctx.createGain();
 
-        // Painting everywhere should get loud and thick, never clipped — one
-        // of the ways "there is no way to play it wrong" is kept true.
         const squash = ctx.createDynamicsCompressor();
         squash.threshold.value = -20;
         squash.ratio.value = 10;
@@ -195,16 +201,13 @@ import "../styles/global.css";
         master.gain.value = 0.9;
         master.connect(squash).connect(ctx.destination);
 
-        // One oscillator per pitch band, running for the life of the page.
-        // Notes are made by moving these gains, not by starting and stopping
-        // voices — that is what makes the result continuous.
         const voices: Voice[] = [];
-        for (let band = DRUM_BANDS; band < BANDS; band++) {
+        for (let i = 0; i < TONE_BANDS; i++) {
           const osc = ctx.createOscillator();
           const gain = ctx.createGain();
 
           osc.type = "triangle";
-          osc.frequency.value = pitchOf(band);
+          osc.frequency.value = KEY_HZ * 2 ** (semitoneOf(i, 0) / 12);
           gain.gain.value = 0;
 
           osc.connect(gain).connect(master);
@@ -250,21 +253,46 @@ import "../styles/global.css";
         source.stop(when + decay + 0.02);
       }
 
-      function kick(active: Audio, when: number, level: number): void {
+      function swept(
+        active: Audio,
+        when: number,
+        from: number,
+        to: number,
+        bend: number,
+        peak: number,
+        decay: number,
+      ): void {
         const osc = active.ctx.createOscillator();
         osc.type = "sine";
-        osc.frequency.setValueAtTime(150, when);
-        osc.frequency.exponentialRampToValueAtTime(45, when + 0.12);
-        osc.connect(envelope(active, when, level * 0.9, 0.3));
+        osc.frequency.setValueAtTime(from, when);
+        osc.frequency.exponentialRampToValueAtTime(to, when + bend);
+        osc.connect(envelope(active, when, peak, decay));
         osc.start(when);
-        osc.stop(when + 0.34);
+        osc.stop(when + decay + 0.04);
       }
 
+      // Four drums that should never be mistaken for one another: a deep thud
+      // with a click on the front, a hollow pitched boom, a crack with a body
+      // tone under the noise, and a tick short enough to read as metal.
       function drum(active: Audio, band: number, when: number, level: number) {
-        if (band === 0) kick(active, when, level);
-        else if (band === 1)
-          burst(active, when, "bandpass", 1900, level * 0.5, 0.14);
-        else burst(active, when, "highpass", 7500, level * 0.3, 0.045);
+        if (band === 0) {
+          swept(active, when, 160, 45, 0.1, level * 0.95, 0.3);
+          burst(active, when, "highpass", 3000, level * 0.18, 0.015);
+        } else if (band === 1) {
+          swept(active, when, 260, 110, 0.18, level * 0.7, 0.34);
+        } else if (band === 2) {
+          burst(active, when, "bandpass", 1800, level * 0.5, 0.16);
+          swept(active, when, 190, 170, 0.1, level * 0.3, 0.11);
+        } else {
+          burst(active, when, "highpass", 9000, level * 0.32, 0.028);
+        }
+      }
+
+      function pluck(gain: GainNode, level: number, now: number): void {
+        gain.gain.cancelScheduledValues(now);
+        gain.gain.setValueAtTime(Math.max(0.0001, gain.gain.value), now);
+        gain.gain.linearRampToValueAtTime(level * level * 0.17, now + 0.006);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.32);
       }
 
       function position(): number {
@@ -274,10 +302,22 @@ import "../styles/global.css";
         return ((elapsed / LOOP_S) * FIELD_W) % FIELD_W;
       }
 
-      // Reads the single column sitting under the play bar and moves the
-      // oscillator bank to match it. Runs far faster than the frame rate so
-      // that a drum onset lands where it was drawn rather than on the next
-      // repaint.
+      // Retunes the whole bank when the progression moves on. A note held
+      // across a bar line changes pitch to stay a chord tone, which is the
+      // voice leading a player would do by hand.
+      function retune(active: Audio, chord: number, now: number): void {
+        if (chord === tunedTo) return;
+        tunedTo = chord;
+
+        for (let i = 0; i < active.voices.length; i++) {
+          active.voices[i].osc.frequency.setTargetAtTime(
+            KEY_HZ * 2 ** (semitoneOf(i, chord) / 12),
+            now,
+            0.02,
+          );
+        }
+      }
+
       function listen(): void {
         const active = audio;
         if (!active) return;
@@ -288,35 +328,58 @@ import "../styles/global.css";
         const col = Math.floor(scroll + BAR_FRAC * FIELD_W) % FIELD_W;
         const now = active.ctx.currentTime;
 
+        retune(active, chordAt(col), now);
+
         // Gather what the bar is sitting on, voicing each mark as a chord
-        // before anything reaches a gain — so the harmony notes mix with
+        // before anything reaches a gain, so the harmony notes mix with
         // whatever else is drawn there rather than stacking on top of it.
         targets.fill(0);
-
-        for (let i = 0; i < targets.length; i++) {
+        for (let i = 0; i < TONE_BANDS; i++) {
           const raw = field[at(col, DRUM_BANDS + i)];
           if (raw < SILENCE) continue;
 
           targets[i] = Math.min(1, targets[i] + raw);
-          if (!harmonise) continue;
+          if (!voicing) continue;
 
-          const fifth = i + CHORD_UP;
-          const octave = i + OCTAVE_UP;
-          if (fifth < targets.length) {
-            targets[fifth] = Math.min(1, targets[fifth] + raw * CHORD_LEVEL);
-          }
-          if (octave < targets.length) {
-            targets[octave] = Math.min(1, targets[octave] + raw * OCTAVE_LEVEL);
+          const offsets = voiceOffsets();
+          for (let v = 0; v < offsets.length; v++) {
+            const to = i + offsets[v];
+            if (to < TONE_BANDS) {
+              targets[to] = Math.min(1, targets[to] + raw * VOICE_LEVELS[v]);
+            }
           }
         }
 
-        for (let i = 0; i < active.voices.length; i++) {
-          const level = targets[i];
-          active.voices[i].gain.gain.setTargetAtTime(
-            level * level * 0.13,
-            now,
-            0.04,
-          );
+        const sub = Math.floor(col / SUB_COLS);
+        const crossed = sub !== lastSub;
+        lastSub = sub;
+
+        if (arping) {
+          // One tone per subdivision, cycling up through whatever is drawn.
+          // Notes left behind ring on rather than being cut, so the arpeggio
+          // overlaps itself the way a real one does.
+          if (crossed) {
+            const live: number[] = [];
+            for (let i = 0; i < TONE_BANDS; i++) {
+              if (targets[i] > 0) live.push(i);
+            }
+
+            if (live.length > 0) {
+              const pick = live[arpStep % live.length];
+              arpStep++;
+              pluck(active.voices[pick].gain, targets[pick], now);
+            } else {
+              arpStep = 0;
+            }
+          }
+        } else {
+          for (let i = 0; i < TONE_BANDS; i++) {
+            active.voices[i].gain.gain.setTargetAtTime(
+              targets[i] * targets[i] * 0.13,
+              now,
+              0.04,
+            );
+          }
         }
 
         for (let band = 0; band < DRUM_BANDS; band++) {
@@ -326,6 +389,15 @@ import "../styles/global.css";
             drum(active, band, now, level);
           }
           lastDrum[band] = level;
+        }
+      }
+
+      function silenceVoices(): void {
+        if (!audio) return;
+        const now = audio.ctx.currentTime;
+        for (const voice of audio.voices) {
+          voice.gain.gain.cancelScheduledValues(now);
+          voice.gain.gain.setTargetAtTime(0, now, 0.05);
         }
       }
 
@@ -349,10 +421,10 @@ import "../styles/global.css";
         wipe: boolean,
         amount: number,
       ): void {
-        // Drums land on the beat, notes land where they were drawn. Rubbing
-        // out is never snapped, or a stray beat would be unerasable.
+        // Drums land on the grid, notes land where they were drawn. Rubbing
+        // out is never snapped, or a stray hit would be unerasable.
         if (snapping && !wipe && band < DRUM_BANDS) {
-          col = (Math.round(col / BEAT_COLS) * BEAT_COLS) % FIELD_W;
+          col = (Math.round(col / SUB_COLS) * SUB_COLS) % FIELD_W;
         }
 
         const reachX = Math.ceil(BRUSH_X);
@@ -366,16 +438,10 @@ import "../styles/global.css";
             const falloff = 1 - Math.hypot(dx / BRUSH_X, dy / BRUSH_Y);
             if (falloff <= 0) continue;
 
-            // Time wraps: the loop is a ring, so a stroke over the seam
-            // carries on rather than stopping at an invisible edge.
             const x = (col + dx + FIELD_W) % FIELD_W;
             const i = at(x, y);
             const add = amount * falloff;
 
-            // Rubbing out snaps to true zero rather than leaving a tail that
-            // is too faint to see but not quite silent. Building up does not
-            // apply the floor, or the soft edge of the brush could never
-            // accumulate past it.
             if (wipe) {
               const next = field[i] - add * 2.5;
               field[i] = next < SILENCE ? 0 : next;
@@ -388,8 +454,7 @@ import "../styles/global.css";
 
       // A pointer reports where it is, not the path it took, so a quick drag
       // arrives as a handful of far-apart samples. Stamping along the line
-      // between the last mark and this one keeps a fast gesture a line rather
-      // than a row of dots.
+      // between the last mark and this one keeps a fast gesture a line.
       function stroke(
         from: [number, number],
         to: [number, number],
@@ -436,6 +501,15 @@ import "../styles/global.css";
 
       // ---- drawing ----------------------------------------------------------
 
+      const HEAT: [number, number, number][] = [
+        [10, 12, 22],
+        [40, 25, 92],
+        [128, 38, 130],
+        [220, 74, 96],
+        [246, 150, 60],
+        [255, 240, 170],
+      ];
+
       function heat(level: number, out: Uint8ClampedArray, o: number): void {
         const scaled = Math.min(0.999, Math.max(0, level)) * (HEAT.length - 1);
         const i = Math.floor(scaled);
@@ -475,22 +549,23 @@ import "../styles/global.css";
           }
         }
 
+        // The display carries the voiced chord as well as the drawn mark, so
+        // nothing is audible without being visible — and parallel bands above
+        // a note is what a spectrogram of a real instrument looks like.
         shown.set(field);
-        if (harmonise) {
+        if (voicing) {
+          const offsets = voiceOffsets();
           for (let band = DRUM_BANDS; band < BANDS; band++) {
             for (let col = 0; col < FIELD_W; col++) {
               const raw = field[at(col, band)];
               if (raw < SILENCE) continue;
 
-              const fifth = band + CHORD_UP;
-              const octave = band + OCTAVE_UP;
-              if (fifth < BANDS) {
-                const i = at(col, fifth);
-                shown[i] = Math.min(1, shown[i] + raw * CHORD_LEVEL);
-              }
-              if (octave < BANDS) {
-                const i = at(col, octave);
-                shown[i] = Math.min(1, shown[i] + raw * OCTAVE_LEVEL);
+              for (let v = 0; v < offsets.length; v++) {
+                const to = band + offsets[v];
+                if (to < BANDS) {
+                  const i = at(col, to);
+                  shown[i] = Math.min(1, shown[i] + raw * VOICE_LEVELS[v]);
+                }
               }
             }
           }
@@ -508,27 +583,56 @@ import "../styles/global.css";
         ctx2d.imageSmoothingEnabled = true;
         ctx2d.clearRect(0, 0, width, height);
 
-        // The screen holds exactly one loop, drawn in two pieces so it can
-        // scroll continuously through the seam.
         const scroll = Math.max(0, position());
         const px = width / FIELD_W;
         const head = FIELD_W - scroll;
 
         ctx2d.drawImage(off, scroll, 0, head, BANDS, 0, 0, head * px, height);
-        ctx2d.drawImage(off, 0, 0, scroll, BANDS, head * px, 0, scroll * px, height);
+        ctx2d.drawImage(
+          off,
+          0,
+          0,
+          scroll,
+          BANDS,
+          head * px,
+          0,
+          scroll * px,
+          height,
+        );
 
         const split = (BANDS - DRUM_BANDS) / BANDS;
+        const screenX = (col: number) =>
+          (((col - scroll + FIELD_W) % FIELD_W) / FIELD_W) * width;
 
-        // The beat grid belongs to the loop, not the screen, so it scrolls
-        // with the marks sitting on it. Every fourth beat is a bar line.
+        // The subdivision grid lives in the drum band, where snapping applies.
         if (snapping) {
-          for (let beat = 0; beat < BEATS; beat++) {
-            const x =
-              (((beat * BEAT_COLS - scroll + FIELD_W) % FIELD_W) / FIELD_W) *
-              width;
+          for (let sub = 0; sub < SUBDIVS; sub++) {
             ctx2d.fillStyle =
-              beat % 4 === 0 ? "rgba(255,255,255,0.14)" : "rgba(255,255,255,0.05)";
-            ctx2d.fillRect(x, split * height, 1, (1 - split) * height);
+              sub % 2 === 0
+                ? "rgba(255,255,255,0.10)"
+                : "rgba(255,255,255,0.04)";
+            ctx2d.fillRect(
+              screenX(sub * SUB_COLS),
+              split * height,
+              1,
+              (1 - split) * height,
+            );
+          }
+        }
+
+        // Bar lines and their chord names run the full height: this is the
+        // song's structure, and a player should be able to see where the
+        // harmony turns over before they draw into it.
+        ctx2d.font =
+          "500 11px ui-monospace, SFMono-Regular, Menlo, monospace";
+        for (let bar = 0; bar < BARS; bar++) {
+          const x = screenX(bar * BAR_COLS);
+          ctx2d.fillStyle = "rgba(255,255,255,0.16)";
+          ctx2d.fillRect(x, 0, 1, height);
+
+          if (harmonise) {
+            ctx2d.fillStyle = "rgba(255,255,255,0.5)";
+            ctx2d.fillText(PROGRESSION[bar].name, x + 6, 15);
           }
         }
 
@@ -547,10 +651,14 @@ import "../styles/global.css";
 
         if (showCursor) {
           const bandH = height / BANDS;
-          const y = (BANDS - 1 - cursorBand) * bandH;
           ctx2d.strokeStyle = "rgba(127,212,193,0.95)";
           ctx2d.lineWidth = 2;
-          ctx2d.strokeRect(barX - 14, y, 28, bandH);
+          ctx2d.strokeRect(
+            barX - 14,
+            (BANDS - 1 - cursorBand) * bandH,
+            28,
+            bandH,
+          );
         }
       }
 
@@ -575,10 +683,9 @@ import "../styles/global.css";
           lastMark = cell;
         });
 
-        // Only records where the pointer is. The painting itself happens in
-        // the frame loop, because the field scrolls underneath a held brush —
-        // holding still has to keep laying down sound, and no pointer event
-        // fires while the pointer is not moving.
+        // Only records where the pointer is. The painting happens in the frame
+        // loop, because the field scrolls underneath a held brush and no
+        // pointer event fires while the pointer is not moving.
         canvas.addEventListener("pointermove", (event) => {
           pointerX = event.clientX;
           pointerY = event.clientY;
@@ -610,9 +717,6 @@ import "../styles/global.css";
             showCursor = true;
             stage?.setAttribute("data-touched", "");
 
-            // Paints at the bar, so the mark is heard now and again each time
-            // the loop comes round — the keyboard plays it live rather than
-            // editing a grid.
             start();
             const scroll = Math.max(0, position());
             paint(
@@ -636,8 +740,22 @@ import "../styles/global.css";
         button.addEventListener("click", () => {
           const on = button.getAttribute("aria-pressed") !== "true";
           button.setAttribute("aria-pressed", String(on));
-          if (button.dataset.toggle === "chords") harmonise = on;
-          else snapping = on;
+
+          switch (button.dataset.toggle) {
+            case "chords":
+              harmonise = on;
+              tunedTo = -1; // the whole bank needs retuning to the new layout
+              break;
+            case "voice":
+              voicing = on;
+              break;
+            case "arp":
+              arping = on;
+              silenceVoices(); // sustains and plucks drive the gains differently
+              break;
+            default:
+              snapping = on;
+          }
         });
       }
 
