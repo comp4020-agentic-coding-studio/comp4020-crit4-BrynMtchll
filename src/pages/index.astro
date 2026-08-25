@@ -6,10 +6,10 @@ import "../styles/global.css";
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>COMP4020 prototype</title>
+    <title>Carousel</title>
     <meta
       name="description"
-      content="Replace this with one sentence saying what this page is. A search result and a link preview both show it."
+      content="A drum machine you draw. Paint on the loop and it plays what you drew, round and round — low rows are drums, high rows are notes."
     />
 
     <!--
@@ -27,12 +27,426 @@ import "../styles/global.css";
         <a href={import.meta.env.BASE_URL}>Home</a>
       </nav>
     </header>
+
     <main>
-      <h1>COMP4020 prototype</h1>
-      <p data-testid="intro">
-        Replace this with your prototype. This week's brief is on the course website;
-        <code>spec/README.md</code> explains how the checks in this repo relate to it.
-      </p>
+      <section data-stage>
+        <canvas
+          data-grid
+          tabindex="0"
+          role="application"
+          aria-label="Drawing loop. Drag to paint sound. Arrow keys move, Enter toggles a cell."
+        ></canvas>
+        <div data-invitation>
+          <h1>Draw to play</h1>
+          <p data-testid="intro">Low is drums, high is notes.</p>
+        </div>
+      </section>
+
+      <div data-controls>
+        <button type="button" data-clear>Clear</button>
+        <p data-hint>Hold shift to rub out.</p>
+      </div>
     </main>
+
+    <script>
+      const canvas = document.querySelector<HTMLCanvasElement>("[data-grid]");
+      const stage = document.querySelector<HTMLElement>("[data-stage]");
+      const clearButton = document.querySelector<HTMLElement>("[data-clear]");
+
+      const COLS = 32;
+      const ROWS = 16;
+      const DRUM_ROWS = 3; // bottom three: hat, snare, kick
+      const PITCH_ROWS = ROWS - DRUM_ROWS;
+
+      const STEP_S = 0.125; // 8 steps a second — a 4 second loop
+      const ROOT_HZ = 110;
+      const PENTATONIC = [0, 3, 5, 7, 10]; // minor pentatonic, in semitones
+
+      // Scheduling. Triggering a voice the moment a timer fires puts every hit
+      // at the mercy of timer jitter, which is audible as a wobbly beat. The
+      // timer instead runs ahead of the music and books voices against the
+      // audio clock, which is sample-accurate.
+      const TICK_MS = 25;
+      const HORIZON_S = 0.1;
+
+      // Painting. The brush has a soft edge so a drag leaves a gradient rather
+      // than a row of hard-toggled cells — cell intensity becomes note
+      // velocity, which is what makes the loop sound drawn rather than clicked.
+      const BRUSH_RADIUS = 1.4;
+      const BRUSH_FLOW = 0.55;
+
+      // Spectrogram heat ramp: deep indigo at the faintest, through magenta and
+      // orange, to near-white where the cell is loudest.
+      const HEAT: [number, number, number][] = [
+        [26, 22, 66],
+        [86, 30, 128],
+        [190, 55, 118],
+        [242, 130, 66],
+        [255, 236, 160],
+      ];
+
+      const cells = new Float32Array(COLS * ROWS);
+
+      type Audio = {
+        ctx: AudioContext;
+        master: GainNode;
+        noise: AudioBuffer;
+        startedAt: number;
+      };
+      let audio: Audio | null = null;
+
+      let nextStep = 0;
+      let nextStepTime = 0;
+      let timer: number | undefined;
+
+      let painting = false;
+      let erasing = false;
+      let focusCol = Math.floor(COLS / 2);
+      let focusRow = ROWS - 1;
+      let showFocus = false;
+
+      function index(col: number, row: number): number {
+        return row * COLS + col;
+      }
+
+      // ---- sound ------------------------------------------------------------
+
+      function makeNoise(ctx: AudioContext): AudioBuffer {
+        const buffer = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate);
+        const data = buffer.getChannelData(0);
+        for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+        return buffer;
+      }
+
+      function ensureAudio(): Audio {
+        if (audio) return audio;
+
+        const ctx = new AudioContext();
+        const master = ctx.createGain();
+
+        // A dense drawing stacks a lot of voices at once. The compressor is
+        // what stops that turning into clipping, so scribbling everywhere is
+        // loud and thick instead of broken.
+        const squash = ctx.createDynamicsCompressor();
+        squash.threshold.value = -18;
+        squash.ratio.value = 8;
+
+        master.gain.value = 0.8;
+        master.connect(squash).connect(ctx.destination);
+
+        audio = { ctx, master, noise: makeNoise(ctx), startedAt: 0 };
+        return audio;
+      }
+
+      function pitchOf(row: number): number {
+        const step = PITCH_ROWS - 1 - row; // bottom of the pitched band is lowest
+        const semitones =
+          Math.floor(step / PENTATONIC.length) * 12 +
+          PENTATONIC[step % PENTATONIC.length];
+        return ROOT_HZ * 2 ** (semitones / 12);
+      }
+
+      function envelope(
+        active: Audio,
+        at: number,
+        peak: number,
+        decay: number,
+      ): GainNode {
+        const gain = active.ctx.createGain();
+        gain.gain.setValueAtTime(0, at);
+        gain.gain.linearRampToValueAtTime(peak, at + 0.005);
+        gain.gain.exponentialRampToValueAtTime(0.0001, at + decay);
+        gain.connect(active.master);
+        return gain;
+      }
+
+      function burst(
+        active: Audio,
+        at: number,
+        type: BiquadFilterType,
+        frequency: number,
+        peak: number,
+        decay: number,
+      ): void {
+        const source = active.ctx.createBufferSource();
+        const filter = active.ctx.createBiquadFilter();
+
+        source.buffer = active.noise;
+        filter.type = type;
+        filter.frequency.value = frequency;
+
+        source.connect(filter).connect(envelope(active, at, peak, decay));
+        source.start(at);
+        source.stop(at + decay + 0.02);
+      }
+
+      function tone(
+        active: Audio,
+        at: number,
+        frequency: number,
+        level: number,
+      ): void {
+        const osc = active.ctx.createOscillator();
+        osc.type = "triangle";
+        osc.frequency.setValueAtTime(frequency, at);
+        osc.connect(envelope(active, at, level * 0.18, 0.45));
+        osc.start(at);
+        osc.stop(at + 0.5);
+      }
+
+      function kick(active: Audio, at: number, level: number): void {
+        const osc = active.ctx.createOscillator();
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(150, at);
+        osc.frequency.exponentialRampToValueAtTime(45, at + 0.12);
+        osc.connect(envelope(active, at, level * 0.9, 0.32));
+        osc.start(at);
+        osc.stop(at + 0.36);
+      }
+
+      function playCell(active: Audio, row: number, at: number, level: number) {
+        if (row === ROWS - 1) kick(active, at, level);
+        else if (row === ROWS - 2)
+          burst(active, at, "bandpass", 1900, level * 0.5, 0.14);
+        else if (row === ROWS - 3)
+          burst(active, at, "highpass", 7500, level * 0.28, 0.045);
+        else tone(active, at, pitchOf(row), level);
+      }
+
+      function tick(): void {
+        const active = audio;
+        if (!active) return;
+
+        while (nextStepTime < active.ctx.currentTime + HORIZON_S) {
+          for (let row = 0; row < ROWS; row++) {
+            const level = cells[index(nextStep, row)];
+            if (level > 0.02) playCell(active, row, nextStepTime, level);
+          }
+          nextStepTime += STEP_S;
+          nextStep = (nextStep + 1) % COLS;
+        }
+      }
+
+      function startLoop(): Audio {
+        const active = ensureAudio();
+        if (active.ctx.state === "suspended") void active.ctx.resume();
+
+        if (timer === undefined) {
+          nextStep = 0;
+          nextStepTime = active.ctx.currentTime + 0.06;
+          active.startedAt = nextStepTime;
+          stage?.setAttribute("data-live", "");
+          timer = window.setInterval(tick, TICK_MS);
+        }
+        return active;
+      }
+
+      // ---- painting ---------------------------------------------------------
+
+      function paint(col: number, row: number, wipe: boolean): void {
+        const reach = Math.ceil(BRUSH_RADIUS);
+
+        for (let dy = -reach; dy <= reach; dy++) {
+          for (let dx = -reach; dx <= reach; dx++) {
+            const x = col + dx;
+            const y = row + dy;
+            if (x < 0 || x >= COLS || y < 0 || y >= ROWS) continue;
+
+            const falloff = 1 - Math.hypot(dx, dy) / BRUSH_RADIUS;
+            if (falloff <= 0) continue;
+
+            const at = index(x, y);
+            const amount = BRUSH_FLOW * falloff;
+            cells[at] = wipe
+              ? Math.max(0, cells[at] - amount * 2)
+              : Math.min(1, cells[at] + amount);
+          }
+        }
+      }
+
+      function cellAt(event: PointerEvent): [number, number] | null {
+        if (!canvas) return null;
+        const box = canvas.getBoundingClientRect();
+        const col = Math.floor(((event.clientX - box.left) / box.width) * COLS);
+        const row = Math.floor(((event.clientY - box.top) / box.height) * ROWS);
+        if (col < 0 || col >= COLS || row < 0 || row >= ROWS) return null;
+        return [col, row];
+      }
+
+      // ---- drawing ----------------------------------------------------------
+
+      function heat(level: number): string {
+        const scaled = Math.min(0.999, Math.max(0, level)) * (HEAT.length - 1);
+        const i = Math.floor(scaled);
+        const t = scaled - i;
+        const [r1, g1, b1] = HEAT[i];
+        const [r2, g2, b2] = HEAT[Math.min(HEAT.length - 1, i + 1)];
+        const mix = (a: number, b: number) => Math.round(a + (b - a) * t);
+        return `rgb(${mix(r1, r2)} ${mix(g1, g2)} ${mix(b1, b2)})`;
+      }
+
+      function phase(): number {
+        if (!audio || !timer) return -1;
+        const elapsed = audio.ctx.currentTime - audio.startedAt;
+        if (elapsed < 0) return 0;
+        return (elapsed / STEP_S) % COLS;
+      }
+
+      function draw(): void {
+        if (!canvas) return;
+        const ctx2d = canvas.getContext("2d");
+        if (!ctx2d) return;
+
+        const dpr = window.devicePixelRatio || 1;
+        const width = canvas.clientWidth;
+        const height = canvas.clientHeight;
+
+        if (canvas.width !== Math.round(width * dpr)) {
+          canvas.width = Math.round(width * dpr);
+          canvas.height = Math.round(height * dpr);
+        }
+
+        ctx2d.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx2d.clearRect(0, 0, width, height);
+
+        const cw = width / COLS;
+        const ch = height / ROWS;
+        const head = phase();
+
+        // The band behind the playhead, so a pass reads as a sweep rather than
+        // a jumping line.
+        if (head >= 0) {
+          const trail = ctx2d.createLinearGradient(0, 0, width, 0);
+          const now = head / COLS;
+          const back = Math.max(0, now - 0.12);
+          trail.addColorStop(back, "rgba(255,255,255,0)");
+          trail.addColorStop(now, "rgba(255,255,255,0.07)");
+          ctx2d.fillStyle = trail;
+          ctx2d.fillRect(0, 0, width, height);
+        }
+
+        // The drum band gets a slightly lifted ground so the split between
+        // drums and notes is visible without a label.
+        ctx2d.fillStyle = "rgba(255,255,255,0.025)";
+        ctx2d.fillRect(0, (ROWS - DRUM_ROWS) * ch, width, DRUM_ROWS * ch);
+
+        ctx2d.strokeStyle = "rgba(255,255,255,0.05)";
+        ctx2d.lineWidth = 1;
+        for (let col = 0; col <= COLS; col += 4) {
+          ctx2d.beginPath();
+          ctx2d.moveTo(col * cw, 0);
+          ctx2d.lineTo(col * cw, height);
+          ctx2d.stroke();
+        }
+
+        for (let row = 0; row < ROWS; row++) {
+          for (let col = 0; col < COLS; col++) {
+            const level = cells[index(col, row)];
+            if (level <= 0.02) continue;
+
+            // Cells light up as the playhead reaches them and fade behind it.
+            const distance = head < 0 ? 8 : (head - col + COLS) % COLS;
+            const lit = distance < 3 ? 1 + (3 - distance) * 0.5 : 1;
+
+            ctx2d.fillStyle = heat(Math.min(1, level * lit));
+            ctx2d.globalAlpha = Math.min(1, 0.25 + level * 0.75);
+            ctx2d.fillRect(
+              col * cw + 1,
+              row * ch + 1,
+              Math.max(1, cw - 2),
+              Math.max(1, ch - 2),
+            );
+          }
+        }
+        ctx2d.globalAlpha = 1;
+
+        if (head >= 0) {
+          const x = (head / COLS) * width;
+          ctx2d.fillStyle = "rgba(255,255,255,0.75)";
+          ctx2d.fillRect(x - 1, 0, 2, height);
+        }
+
+        if (showFocus) {
+          ctx2d.strokeStyle = "rgba(255,255,255,0.9)";
+          ctx2d.lineWidth = 2;
+          ctx2d.strokeRect(focusCol * cw, focusRow * ch, cw, ch);
+        }
+
+        requestAnimationFrame(draw);
+      }
+
+      // ---- input ------------------------------------------------------------
+
+      if (canvas) {
+        canvas.addEventListener("pointerdown", (event) => {
+          const cell = cellAt(event);
+          if (!cell) return;
+
+          canvas.setPointerCapture(event.pointerId);
+          painting = true;
+          erasing = event.shiftKey || event.button === 2;
+          showFocus = false;
+          stage?.setAttribute("data-touched", "");
+
+          startLoop();
+          paint(cell[0], cell[1], erasing);
+        });
+
+        canvas.addEventListener("pointermove", (event) => {
+          if (!painting) return;
+          const cell = cellAt(event);
+          if (cell) paint(cell[0], cell[1], erasing);
+        });
+
+        for (const ending of ["pointerup", "pointercancel"] as const) {
+          canvas.addEventListener(ending, () => {
+            painting = false;
+          });
+        }
+
+        canvas.addEventListener("contextmenu", (event) => {
+          event.preventDefault();
+        });
+
+        canvas.addEventListener("keydown", (event) => {
+          const moves: Record<string, [number, number]> = {
+            ArrowLeft: [-1, 0],
+            ArrowRight: [1, 0],
+            ArrowUp: [0, -1],
+            ArrowDown: [0, 1],
+          };
+          const move = moves[event.key];
+
+          if (move) {
+            focusCol = (focusCol + move[0] + COLS) % COLS;
+            focusRow = Math.min(ROWS - 1, Math.max(0, focusRow + move[1]));
+            showFocus = true;
+            event.preventDefault();
+            return;
+          }
+
+          if (event.key === "Enter" || event.key === " ") {
+            showFocus = true;
+            stage?.setAttribute("data-touched", "");
+            const active = startLoop();
+            const at = index(focusCol, focusRow);
+
+            if (cells[at] > 0.02) {
+              cells[at] = 0;
+            } else {
+              cells[at] = 1;
+              playCell(active, focusRow, active.ctx.currentTime, 1);
+            }
+            event.preventDefault();
+          }
+        });
+      }
+
+      clearButton?.addEventListener("click", () => {
+        cells.fill(0);
+      });
+
+      draw();
+    </script>
   </body>
 </html>
